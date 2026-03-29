@@ -10,6 +10,7 @@
     "terrain:build": "node scripts/build-terrain.mjs"
   },
   "dependencies": {
+    "fflate": "^0.8.2",
     "geotiff": "^3.0.5",
     "three": "^0.183.2"
   },

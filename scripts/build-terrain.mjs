@@ -1,22 +1,29 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 import { fromFile } from 'geotiff';
 
-const DEFAULT_SOURCE = 'MDT02-WGS84-0178-2-COB2.tif';
-const DEFAULT_MAX_EDGE = 1024;
+const DATA_DIR = 'data';
+const DEM_TILE_PATTERN = /^MDT02-ETRS89-HU31-.*\.tif$/i;
+const DEFAULT_MAX_EDGE = 1536;
 const DEFAULT_VERTICAL_EXAGGERATION = 1.0;
+const EXPECTED_EPSG = 25831;
+const EXPECTED_RESOLUTION = 2;
+
 const OUTPUT_DIR = path.join('public', 'data');
-const OUTPUT_HEIGHTS = 'terrain-height.u16.bin';
+const OUTPUT_HEIGHTS = 'terrain-height.u16.bin.gz';
+const OUTPUT_HEIGHTS_RAW = 'terrain-height.u16.bin';
 const OUTPUT_METADATA = 'terrain.json';
+const OUTPUT_ORTHO = 'terrain-ortho.webp';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
 
-function parseNoData(fileDirectory) {
-  const rawValue = fileDirectory.GDAL_NODATA;
+function parseNoData(image) {
+  const rawValue = image.getGDALNoData?.();
   if (rawValue === undefined || rawValue === null) {
     return -32767;
   }
@@ -25,44 +32,46 @@ function parseNoData(fileDirectory) {
   return Number.isFinite(parsed) ? parsed : -32767;
 }
 
-function computeBounds(fileDirectory, sourceWidth, sourceHeight) {
-  const [scaleX = 0, scaleY = 0] = fileDirectory.ModelPixelScale ?? [];
-  const [rasterX = 0, rasterY = 0, , geoX = 0, geoY = 0] = fileDirectory.ModelTiepoint ?? [];
+function assertProjectedCrs(image, label) {
+  const geoKeys = image.getGeoKeys?.() ?? {};
+  const epsg = Number(geoKeys.ProjectedCSTypeGeoKey);
 
-  if (!scaleX || !scaleY) {
-    throw new Error('GeoTIFF is missing a valid ModelPixelScale tag.');
+  if (epsg !== EXPECTED_EPSG) {
+    throw new Error(
+      `${label} must be EPSG:${EXPECTED_EPSG}, received "${geoKeys.ProjectedCSTypeGeoKey ?? 'unknown'}".`,
+    );
+  }
+}
+
+function assertResolution(image, label) {
+  const [resolutionX, resolutionY] = image.getResolution();
+  if (Math.abs(resolutionX) !== EXPECTED_RESOLUTION || Math.abs(resolutionY) !== EXPECTED_RESOLUTION) {
+    throw new Error(
+      `${label} must have ${EXPECTED_RESOLUTION} m pixels, received ${resolutionX} x ${resolutionY}.`,
+    );
+  }
+}
+
+function computeBounds(image) {
+  const bbox = image.getBoundingBox?.();
+  if (!bbox || bbox.length !== 4) {
+    throw new Error('GeoTIFF is missing a valid bounding box.');
   }
 
-  const west = geoX - rasterX * scaleX;
-  const north = geoY + rasterY * scaleY;
-  const east = west + sourceWidth * scaleX;
-  const south = north - sourceHeight * scaleY;
-
-  return { west, south, east, north };
-}
-
-function computeMetersPerDegree(latitude) {
-  const radians = (latitude * Math.PI) / 180;
-  const lat =
-    111132.92 -
-    559.82 * Math.cos(2 * radians) +
-    1.175 * Math.cos(4 * radians) -
-    0.0023 * Math.cos(6 * radians);
-  const lon =
-    111412.84 * Math.cos(radians) -
-    93.5 * Math.cos(3 * radians) +
-    0.118 * Math.cos(5 * radians);
-
-  return { lat, lon };
-}
-
-function computeTerrainSize(bounds) {
-  const centerLatitude = (bounds.north + bounds.south) / 2;
-  const metersPerDegree = computeMetersPerDegree(centerLatitude);
-
   return {
-    width: Math.abs(bounds.east - bounds.west) * metersPerDegree.lon,
-    height: Math.abs(bounds.north - bounds.south) * metersPerDegree.lat,
+    west: bbox[0],
+    south: bbox[1],
+    east: bbox[2],
+    north: bbox[3],
+  };
+}
+
+function expandBounds(accumulator, bounds) {
+  return {
+    west: Math.min(accumulator.west, bounds.west),
+    south: Math.min(accumulator.south, bounds.south),
+    east: Math.max(accumulator.east, bounds.east),
+    north: Math.max(accumulator.north, bounds.north),
   };
 }
 
@@ -84,89 +93,192 @@ function isNoData(value, noDataValue) {
   return !Number.isFinite(value) || Object.is(value, noDataValue) || Math.abs(value - noDataValue) < 1e-6;
 }
 
+function computeDestinationWindow(tileBounds, mergedBounds, targetSize) {
+  const mergedWidth = mergedBounds.east - mergedBounds.west;
+  const mergedHeight = mergedBounds.north - mergedBounds.south;
+
+  const colStart = Math.max(
+    0,
+    Math.min(targetSize.width - 1, Math.floor(((tileBounds.west - mergedBounds.west) / mergedWidth) * targetSize.width)),
+  );
+  const colEnd = Math.max(
+    colStart + 1,
+    Math.min(targetSize.width, Math.ceil(((tileBounds.east - mergedBounds.west) / mergedWidth) * targetSize.width)),
+  );
+  const rowStart = Math.max(
+    0,
+    Math.min(
+      targetSize.height - 1,
+      Math.floor(((mergedBounds.north - tileBounds.north) / mergedHeight) * targetSize.height),
+    ),
+  );
+  const rowEnd = Math.max(
+    rowStart + 1,
+    Math.min(
+      targetSize.height,
+      Math.ceil(((mergedBounds.north - tileBounds.south) / mergedHeight) * targetSize.height),
+    ),
+  );
+
+  return {
+    colStart,
+    colEnd,
+    rowStart,
+    rowEnd,
+    width: colEnd - colStart,
+    height: rowEnd - rowStart,
+  };
+}
+
+async function discoverTiles() {
+  const dataDir = path.resolve(repoRoot, DATA_DIR);
+  const entries = await fs.readdir(dataDir);
+  const tileNames = entries.filter((name) => DEM_TILE_PATTERN.test(name)).sort();
+
+  if (tileNames.length === 0) {
+    throw new Error(`No DEM tiles matching ${DEM_TILE_PATTERN} were found in "${DATA_DIR}".`);
+  }
+
+  const tiles = [];
+  let mergedBounds = null;
+  let noDataValue = null;
+
+  for (const tileName of tileNames) {
+    const tilePath = path.join(dataDir, tileName);
+    const image = await (await fromFile(tilePath)).getImage();
+
+    assertProjectedCrs(image, tileName);
+    assertResolution(image, tileName);
+
+    if (image.getSamplesPerPixel() !== 1) {
+      throw new Error(`${tileName} must be single-band, received ${image.getSamplesPerPixel()} samples per pixel.`);
+    }
+
+    const tileNoData = parseNoData(image);
+    if (noDataValue === null) {
+      noDataValue = tileNoData;
+    } else if (Math.abs(tileNoData - noDataValue) > 1e-6) {
+      throw new Error(`${tileName} uses nodata ${tileNoData}, expected ${noDataValue}.`);
+    }
+
+    const bounds = computeBounds(image);
+    mergedBounds = mergedBounds ? expandBounds(mergedBounds, bounds) : bounds;
+
+    tiles.push({
+      name: tileName,
+      path: tilePath,
+      image,
+      bounds,
+    });
+  }
+
+  return {
+    tiles,
+    mergedBounds,
+    noDataValue,
+  };
+}
+
 async function main() {
-  const sourceFile = process.argv[2] ?? DEFAULT_SOURCE;
   const maxEdge = Number.parseInt(process.env.TERRAIN_MAX_EDGE ?? String(DEFAULT_MAX_EDGE), 10);
   if (!Number.isFinite(maxEdge) || maxEdge < 2) {
     throw new Error(`Invalid TERRAIN_MAX_EDGE value "${process.env.TERRAIN_MAX_EDGE}".`);
   }
 
-  const sourcePath = path.resolve(repoRoot, sourceFile);
   const outputDir = path.resolve(repoRoot, OUTPUT_DIR);
-
-  const tiff = await fromFile(sourcePath);
-  const image = await tiff.getImage();
-  const fileDirectory = image.fileDirectory;
-
-  const sourceWidth = image.getWidth();
-  const sourceHeight = image.getHeight();
-  const samplesPerPixel = image.getSamplesPerPixel();
-
-  if (samplesPerPixel !== 1) {
-    throw new Error(`Expected a single-band DEM, received ${samplesPerPixel} samples per pixel.`);
-  }
-
+  const { tiles, mergedBounds, noDataValue } = await discoverTiles();
+  const sourceWidth = Math.round((mergedBounds.east - mergedBounds.west) / EXPECTED_RESOLUTION);
+  const sourceHeight = Math.round((mergedBounds.north - mergedBounds.south) / EXPECTED_RESOLUTION);
   const targetSize = computeTargetSize(sourceWidth, sourceHeight, maxEdge);
-  const noDataValue = parseNoData(fileDirectory);
-  const bounds = computeBounds(fileDirectory, sourceWidth, sourceHeight);
-  const sizeMeters = computeTerrainSize(bounds);
 
-  const raster = await image.readRasters({
-    interleave: true,
-    width: targetSize.width,
-    height: targetSize.height,
-    fillValue: noDataValue,
-    // Nearest-neighbour avoids blending nodata into valid elevations at the raster edges.
-    resampleMethod: 'nearest',
-  });
+  const mergedRaster = new Float32Array(targetSize.width * targetSize.height);
+  const validMask = new Uint8Array(targetSize.width * targetSize.height);
+
+  for (const tile of tiles) {
+    const window = computeDestinationWindow(tile.bounds, mergedBounds, targetSize);
+    const raster = await tile.image.readRasters({
+      interleave: true,
+      width: window.width,
+      height: window.height,
+      fillValue: noDataValue,
+      resampleMethod: 'nearest',
+    });
+
+    for (let row = 0; row < window.height; row += 1) {
+      const sourceOffset = row * window.width;
+      const destinationOffset = (window.rowStart + row) * targetSize.width + window.colStart;
+
+      for (let col = 0; col < window.width; col += 1) {
+        const value = raster[sourceOffset + col];
+        if (isNoData(value, noDataValue)) {
+          continue;
+        }
+
+        mergedRaster[destinationOffset + col] = value;
+        validMask[destinationOffset + col] = 1;
+      }
+    }
+  }
 
   let minElevation = Number.POSITIVE_INFINITY;
   let maxElevation = Number.NEGATIVE_INFINITY;
 
-  for (const value of raster) {
-    if (isNoData(value, noDataValue)) {
+  for (let index = 0; index < mergedRaster.length; index += 1) {
+    if (!validMask[index]) {
       continue;
     }
 
+    const value = mergedRaster[index];
     if (value < minElevation) {
       minElevation = value;
     }
-
     if (value > maxElevation) {
       maxElevation = value;
     }
   }
 
   if (!Number.isFinite(minElevation) || !Number.isFinite(maxElevation)) {
-    throw new Error('The DEM did not contain any valid elevation values after resampling.');
+    throw new Error('The merged DEM mosaic does not contain any valid elevation values.');
   }
 
   const elevationSpan = Math.max(maxElevation - minElevation, 1e-6);
-  const encodedHeights = new Uint16Array(raster.length);
+  const encodedHeights = new Uint16Array(mergedRaster.length);
 
-  for (let index = 0; index < raster.length; index += 1) {
-    const value = raster[index];
-    if (isNoData(value, noDataValue)) {
+  for (let index = 0; index < mergedRaster.length; index += 1) {
+    if (!validMask[index]) {
       encodedHeights[index] = 0;
       continue;
     }
 
-    const normalized = (value - minElevation) / elevationSpan;
+    const normalized = (mergedRaster[index] - minElevation) / elevationSpan;
     encodedHeights[index] = Math.min(65535, Math.max(1, Math.round(normalized * 65534) + 1));
   }
 
+  const heightBuffer = Buffer.from(encodedHeights.buffer, encodedHeights.byteOffset, encodedHeights.byteLength);
+  const gzippedHeights = gzipSync(heightBuffer, { level: 9 });
+
   const metadata = {
-    sourceFile: path.basename(sourcePath),
+    sourceFiles: tiles.map((tile) => tile.name),
     width: targetSize.width,
     height: targetSize.height,
-    bounds,
-    sizeMeters,
+    crs: {
+      epsg: EXPECTED_EPSG,
+      kind: 'projected',
+      units: 'meter',
+    },
+    bounds: mergedBounds,
+    sizeMeters: {
+      width: mergedBounds.east - mergedBounds.west,
+      height: mergedBounds.north - mergedBounds.south,
+    },
     elevationRange: {
       min: Number(minElevation.toFixed(3)),
       max: Number(maxElevation.toFixed(3)),
     },
-    heightEncoding: {
+    heightAsset: {
+      url: `/data/${OUTPUT_HEIGHTS}`,
       format: 'uint16',
+      compression: 'gzip',
       noDataCode: 0,
     },
     defaultVerticalExaggeration: DEFAULT_VERTICAL_EXAGGERATION,
@@ -176,25 +288,20 @@ async function main() {
   };
 
   await fs.mkdir(outputDir, { recursive: true });
-  await fs.writeFile(
-    path.join(outputDir, OUTPUT_HEIGHTS),
-    Buffer.from(encodedHeights.buffer, encodedHeights.byteOffset, encodedHeights.byteLength),
-  );
+  await fs.rm(path.join(outputDir, OUTPUT_ORTHO), { force: true });
+  await fs.rm(path.join(outputDir, OUTPUT_HEIGHTS_RAW), { force: true });
+  await fs.writeFile(path.join(outputDir, OUTPUT_HEIGHTS), gzippedHeights);
   await fs.writeFile(path.join(outputDir, OUTPUT_METADATA), `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
-
-  const footprintKm = {
-    width: (sizeMeters.width / 1000).toFixed(2),
-    height: (sizeMeters.height / 1000).toFixed(2),
-  };
 
   console.log(
     JSON.stringify(
       {
-        source: metadata.sourceFile,
+        sources: metadata.sourceFiles,
         targetWidth: metadata.width,
         targetHeight: metadata.height,
+        sizeMeters: metadata.sizeMeters,
         elevationRange: metadata.elevationRange,
-        footprintKm,
+        gzippedBytes: gzippedHeights.length,
         outputDir: path.relative(repoRoot, outputDir),
       },
       null,

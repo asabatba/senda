@@ -1,26 +1,39 @@
 {
-  "sourceFile": "MDT02-WGS84-0178-2-COB2.tif",
-  "width": 1024,
-  "height": 499,
+  "sourceFiles": [
+    "MDT02-ETRS89-HU31-0146-1-COB2.tif",
+    "MDT02-ETRS89-HU31-0146-3-COB2.tif",
+    "MDT02-ETRS89-HU31-0146-4-COB2.tif",
+    "MDT02-ETRS89-HU31-0178-1-COB2.tif",
+    "MDT02-ETRS89-HU31-0178-2-COB2.tif"
+  ],
+  "width": 1536,
+  "height": 1494,
+  "crs": {
+    "epsg": 25831,
+    "kind": "projected",
+    "units": "meter"
+  },
   "bounds": {
-    "west": -0.033867738978222414,
-    "south": 42.58634485670084,
-    "east": 0.1499482610217776,
-    "north": 42.67591285670084
+    "west": 238028,
+    "south": 4719330,
+    "east": 266779,
+    "north": 4747288
   },
   "sizeMeters": {
-    "width": 15077.877139842574,
-    "height": 9949.708147506455
+    "width": 28751,
+    "height": 27958
   },
   "elevationRange": {
-    "min": 866.077,
-    "max": 3255.181
+    "min": 858.158,
+    "max": 3345.994
   },
-  "heightEncoding": {
+  "heightAsset": {
+    "url": "/data/terrain-height.u16.bin.gz",
     "format": "uint16",
+    "compression": "gzip",
     "noDataCode": 0
   },
-  "defaultVerticalExaggeration": 1.0,
+  "defaultVerticalExaggeration": 1,
   "overlay": {
     "url": null
   }

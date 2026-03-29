@@ -1,5 +1,6 @@
 import "./style.css";
 
+import { gunzipSync } from "fflate";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
@@ -7,9 +8,14 @@ import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 
 type TerrainMetadata = {
-	sourceFile: string;
+	sourceFiles: string[];
 	width: number;
 	height: number;
+	crs: {
+		epsg: number;
+		kind: "projected" | "geographic";
+		units: "meter" | "degree";
+	};
 	bounds: {
 		west: number;
 		south: number;
@@ -24,8 +30,10 @@ type TerrainMetadata = {
 		min: number;
 		max: number;
 	};
-	heightEncoding: {
+	heightAsset: {
+		url: string;
 		format: "uint16";
+		compression: "gzip" | "none";
 		noDataCode: 0;
 	};
 	defaultVerticalExaggeration: number;
@@ -86,6 +94,10 @@ const TRACK_COLORS = [
 	"#c39bff",
 ];
 const TRACK_SURFACE_OFFSET = 14;
+const GRS80_A = 6378137.0;
+const GRS80_F = 1 / 298.257222101;
+const UTM_K0 = 0.9996;
+const UTM31_CENTRAL_MERIDIAN = ((31 - 1) * 6 - 180 + 3) * (Math.PI / 180);
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
@@ -230,19 +242,62 @@ const rimLight = new THREE.DirectionalLight(0xb8d4ff, 0.35);
 rimLight.position.set(-4000, 2500, -4500);
 scene.add(rimLight);
 
-const textureLoader = new THREE.TextureLoader();
 const trackOverlays: TrackOverlay[] = [];
 
 let terrainRuntime: TerrainRuntime | null = null;
 let animationHandle = 0;
 let trackColorCursor = 0;
 
-function formatBounds(bounds: TerrainMetadata["bounds"]) {
-	return `${bounds.west.toFixed(4)}, ${bounds.south.toFixed(4)} -> ${bounds.east.toFixed(4)}, ${bounds.north.toFixed(4)}`;
+function formatBounds(metadata: TerrainMetadata) {
+	if (metadata.crs.kind === "projected") {
+		return `${metadata.bounds.west.toFixed(0)}, ${metadata.bounds.south.toFixed(0)} -> ${metadata.bounds.east.toFixed(0)}, ${metadata.bounds.north.toFixed(0)} m`;
+	}
+
+	return `${metadata.bounds.west.toFixed(4)}, ${metadata.bounds.south.toFixed(4)} -> ${metadata.bounds.east.toFixed(4)}, ${metadata.bounds.north.toFixed(4)}`;
 }
 
 function formatDistance(value: number) {
 	return `${(value / 1000).toFixed(2)} km`;
+}
+
+function latLonToUtm31(latitude: number, longitude: number) {
+	const e2 = GRS80_F * (2 - GRS80_F);
+	const ep2 = e2 / (1 - e2);
+	const lat = (latitude * Math.PI) / 180;
+	const lon = (longitude * Math.PI) / 180;
+
+	const sinLat = Math.sin(lat);
+	const cosLat = Math.cos(lat);
+	const tanLat = Math.tan(lat);
+	const n = GRS80_A / Math.sqrt(1 - e2 * sinLat * sinLat);
+	const t = tanLat * tanLat;
+	const c = ep2 * cosLat * cosLat;
+	const a = cosLat * (lon - UTM31_CENTRAL_MERIDIAN);
+	const m =
+		GRS80_A *
+		((1 - e2 / 4 - (3 * e2 ** 2) / 64 - (5 * e2 ** 3) / 256) * lat -
+			((3 * e2) / 8 + (3 * e2 ** 2) / 32 + (45 * e2 ** 3) / 1024) * Math.sin(2 * lat) +
+			((15 * e2 ** 2) / 256 + (45 * e2 ** 3) / 1024) * Math.sin(4 * lat) -
+			((35 * e2 ** 3) / 3072) * Math.sin(6 * lat));
+
+	const easting =
+		UTM_K0 *
+			n *
+			(a +
+				((1 - t + c) * a ** 3) / 6 +
+				((5 - 18 * t + t ** 2 + 72 * c - 58 * ep2) * a ** 5) / 120) +
+		500000;
+
+	const northing =
+		UTM_K0 *
+		(m +
+			n *
+				tanLat *
+				(a ** 2 / 2 +
+					((5 - t + 9 * c + 4 * c ** 2) * a ** 4) / 24 +
+					((61 - 58 * t + t ** 2 + 600 * c - 330 * ep2) * a ** 6) / 720));
+
+	return { easting, northing };
 }
 
 function formatCount(value: number, noun: string) {
@@ -272,7 +327,7 @@ function nextTrackColor() {
 }
 
 function decodeHeight(code: number, metadata: TerrainMetadata) {
-	if (code === metadata.heightEncoding.noDataCode) {
+	if (code === metadata.heightAsset.noDataCode) {
 		return metadata.elevationRange.min;
 	}
 
@@ -309,7 +364,7 @@ function sampleHeight(
 function getRasterHeightSample(runtime: TerrainRuntime, x: number, y: number) {
 	const index = y * runtime.metadata.width + x;
 	if (
-		runtime.heightCodes[index] === runtime.metadata.heightEncoding.noDataCode
+		runtime.heightCodes[index] === runtime.metadata.heightAsset.noDataCode
 	) {
 		return null;
 	}
@@ -383,7 +438,7 @@ function rampColor(normalizedHeight: number) {
 	return stops.at(-1)?.color ?? [247, 245, 240];
 }
 
-function createReliefTexture(heights: Float32Array, metadata: TerrainMetadata) {
+function createReliefCanvas(heights: Float32Array, metadata: TerrainMetadata) {
 	const pixelCount = metadata.width * metadata.height;
 	const pixels = new Uint8Array(pixelCount * 3);
 	const span = Math.max(
@@ -443,20 +498,24 @@ function createReliefTexture(heights: Float32Array, metadata: TerrainMetadata) {
 		}
 	}
 
-	const texture = new THREE.DataTexture(
-		pixels,
-		metadata.width,
-		metadata.height,
-		THREE.RGBFormat,
-	);
-	texture.colorSpace = THREE.SRGBColorSpace;
-	texture.needsUpdate = true;
-	texture.wrapS = THREE.ClampToEdgeWrapping;
-	texture.wrapT = THREE.ClampToEdgeWrapping;
-	texture.minFilter = THREE.LinearFilter;
-	texture.magFilter = THREE.LinearFilter;
-	texture.generateMipmaps = false;
-	return texture;
+	const canvasElement = document.createElement("canvas");
+	canvasElement.width = metadata.width;
+	canvasElement.height = metadata.height;
+	const context = canvasElement.getContext("2d");
+	if (!context) {
+		throw new Error("Failed to create a 2D canvas for the relief texture.");
+	}
+
+	const imageData = context.createImageData(metadata.width, metadata.height);
+	for (let index = 0; index < pixelCount; index += 1) {
+		imageData.data[index * 4] = pixels[index * 3];
+		imageData.data[index * 4 + 1] = pixels[index * 3 + 1];
+		imageData.data[index * 4 + 2] = pixels[index * 3 + 2];
+		imageData.data[index * 4 + 3] = 255;
+	}
+
+	context.putImageData(imageData, 0, 0);
+	return canvasElement;
 }
 
 function applyVerticalExaggeration(
@@ -476,17 +535,16 @@ async function buildSurfaceTexture(
 	metadata: TerrainMetadata,
 	heights: Float32Array,
 ) {
-	if (metadata.overlay.url) {
-		const overlayTexture = await textureLoader.loadAsync(metadata.overlay.url);
-		overlayTexture.colorSpace = THREE.SRGBColorSpace;
-		overlayTexture.wrapS = THREE.ClampToEdgeWrapping;
-		overlayTexture.wrapT = THREE.ClampToEdgeWrapping;
-		overlayTexture.minFilter = THREE.LinearMipmapLinearFilter;
-		overlayTexture.magFilter = THREE.LinearFilter;
-		return overlayTexture;
-	}
+	const reliefCanvas = createReliefCanvas(heights, metadata);
 
-	return createReliefTexture(heights, metadata);
+	const texture = new THREE.CanvasTexture(reliefCanvas);
+	texture.colorSpace = THREE.SRGBColorSpace;
+	texture.wrapS = THREE.ClampToEdgeWrapping;
+	texture.wrapT = THREE.ClampToEdgeWrapping;
+	texture.minFilter = THREE.LinearMipmapLinearFilter;
+	texture.magFilter = THREE.LinearFilter;
+	texture.needsUpdate = true;
+	return texture;
 }
 
 function getCurrentExaggeration() {
@@ -500,10 +558,17 @@ function getCurrentExaggeration() {
 
 function projectTrackPoint(point: TrackPoint, runtime: TerrainRuntime) {
 	const { bounds, sizeMeters, width, height } = runtime.metadata;
-	const lonSpan = bounds.east - bounds.west;
-	const latSpan = bounds.north - bounds.south;
-	const normalizedX = (point.lon - bounds.west) / lonSpan;
-	const normalizedY = (bounds.north - point.lat) / latSpan;
+	let projectedX = point.lon;
+	let projectedY = point.lat;
+
+	if (runtime.metadata.crs.kind === "projected" && runtime.metadata.crs.epsg === 25831) {
+		const projectedPoint = latLonToUtm31(point.lat, point.lon);
+		projectedX = projectedPoint.easting;
+		projectedY = projectedPoint.northing;
+	}
+
+	const normalizedX = (projectedX - bounds.west) / (bounds.east - bounds.west);
+	const normalizedY = (bounds.north - projectedY) / (bounds.north - bounds.south);
 
 	if (
 		normalizedX < 0 ||
@@ -768,10 +833,28 @@ function resizeRenderer() {
 }
 
 function updateStats(metadata: TerrainMetadata) {
-	sourceNode.textContent = metadata.sourceFile;
+	sourceNode.textContent =
+		metadata.sourceFiles.length === 1
+			? metadata.sourceFiles[0]
+			: `${metadata.sourceFiles.length} DEM tiles`;
 	footprintNode.textContent = `${formatDistance(metadata.sizeMeters.width)} x ${formatDistance(metadata.sizeMeters.height)}`;
 	elevationRangeNode.textContent = `${metadata.elevationRange.min.toFixed(0)} m to ${metadata.elevationRange.max.toFixed(0)} m`;
-	boundsNode.textContent = formatBounds(metadata.bounds);
+	boundsNode.textContent = formatBounds(metadata);
+}
+
+async function inflateHeightAsset(compressedBytes: Uint8Array) {
+	if ("DecompressionStream" in globalThis) {
+		const stream = new Blob([compressedBytes]).stream().pipeThrough(
+			new DecompressionStream("gzip"),
+		);
+		return await new Response(stream).arrayBuffer();
+	}
+
+	const decompressed = gunzipSync(compressedBytes);
+	return decompressed.buffer.slice(
+		decompressed.byteOffset,
+		decompressed.byteOffset + decompressed.byteLength,
+	);
 }
 
 function getDirectChildrenByTag(parent: Element, tagName: string) {
@@ -956,14 +1039,18 @@ async function loadTerrain() {
 	const metadata = (await metadataResponse.json()) as TerrainMetadata;
 
 	statusNode.textContent = "Loading terrain heightmap...";
-	const heightResponse = await fetch("/data/terrain-height.u16.bin");
+	const heightResponse = await fetch(metadata.heightAsset.url);
 	if (!heightResponse.ok) {
 		throw new Error(
 			`Terrain height asset request failed with ${heightResponse.status}.`,
 		);
 	}
 
-	const rawHeightBuffer = await heightResponse.arrayBuffer();
+	const compressedHeightBuffer = await heightResponse.arrayBuffer();
+	const rawHeightBuffer =
+		metadata.heightAsset.compression === "gzip"
+			? await inflateHeightAsset(new Uint8Array(compressedHeightBuffer))
+			: compressedHeightBuffer;
 	const expectedByteLength =
 		metadata.width * metadata.height * Uint16Array.BYTES_PER_ELEMENT;
 	if (rawHeightBuffer.byteLength !== expectedByteLength) {
