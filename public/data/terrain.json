@@ -1,0 +1,27 @@
+{
+  "sourceFile": "MDT02-WGS84-0178-2-COB2.tif",
+  "width": 1024,
+  "height": 499,
+  "bounds": {
+    "west": -0.033867738978222414,
+    "south": 42.58634485670084,
+    "east": 0.1499482610217776,
+    "north": 42.67591285670084
+  },
+  "sizeMeters": {
+    "width": 15077.877139842574,
+    "height": 9949.708147506455
+  },
+  "elevationRange": {
+    "min": 866.077,
+    "max": 3255.181
+  },
+  "heightEncoding": {
+    "format": "uint16",
+    "noDataCode": 0
+  },
+  "defaultVerticalExaggeration": 1.0,
+  "overlay": {
+    "url": null
+  }
+}
