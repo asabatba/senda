@@ -276,7 +276,7 @@ async function main() {
       max: Number(maxElevation.toFixed(3)),
     },
     heightAsset: {
-      url: `/data/${OUTPUT_HEIGHTS}`,
+      url: OUTPUT_HEIGHTS,
       format: 'uint16',
       compression: 'gzip',
       noDataCode: 0,

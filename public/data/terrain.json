@@ -28,7 +28,7 @@
     "max": 3345.994
   },
   "heightAsset": {
-    "url": "/data/terrain-height.u16.bin.gz",
+    "url": "terrain-height.u16.bin.gz",
     "format": "uint16",
     "compression": "gzip",
     "noDataCode": 0

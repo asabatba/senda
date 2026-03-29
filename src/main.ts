@@ -94,6 +94,22 @@ const TRACK_COLORS = [
 	"#c39bff",
 ];
 const TRACK_SURFACE_OFFSET = 14;
+const KEYBOARD_MOVE_CODES = new Set([
+	"KeyW",
+	"KeyA",
+	"KeyS",
+	"KeyD",
+	"KeyQ",
+	"KeyE",
+	"ArrowUp",
+	"ArrowDown",
+	"ArrowLeft",
+	"ArrowRight",
+	"PageUp",
+	"PageDown",
+	"ShiftLeft",
+	"ShiftRight",
+]);
 const GRS80_A = 6378137.0;
 const GRS80_F = 1 / 298.257222101;
 const UTM_K0 = 0.9996;
@@ -109,6 +125,10 @@ app.innerHTML = `
     <section class="viewer-shell">
       <canvas class="viewer" aria-label="3D terrain viewer"></canvas>
       <div class="viewer-overlay"></div>
+      <div class="viewer-hint">
+        <strong>Keyboard</strong>
+        <span>WASD or arrows to move, Q/E or PgUp/PgDn for altitude, Shift to accelerate.</span>
+      </div>
     </section>
     <aside class="panel">
       <p class="eyebrow">Pyrenees DEM</p>
@@ -243,6 +263,11 @@ rimLight.position.set(-4000, 2500, -4500);
 scene.add(rimLight);
 
 const trackOverlays: TrackOverlay[] = [];
+const pressedKeys = new Set<string>();
+const clock = new THREE.Clock();
+const keyboardForward = new THREE.Vector3();
+const keyboardRight = new THREE.Vector3();
+const keyboardOffset = new THREE.Vector3();
 
 let terrainRuntime: TerrainRuntime | null = null;
 let animationHandle = 0;
@@ -258,6 +283,18 @@ function formatBounds(metadata: TerrainMetadata) {
 
 function formatDistance(value: number) {
 	return `${(value / 1000).toFixed(2)} km`;
+}
+
+function isEditableTarget(target: EventTarget | null) {
+	if (!(target instanceof HTMLElement)) {
+		return false;
+	}
+
+	if (target.isContentEditable) {
+		return true;
+	}
+
+	return Boolean(target.closest("input, textarea, select, button, label"));
 }
 
 function latLonToUtm31(latitude: number, longitude: number) {
@@ -276,7 +313,8 @@ function latLonToUtm31(latitude: number, longitude: number) {
 	const m =
 		GRS80_A *
 		((1 - e2 / 4 - (3 * e2 ** 2) / 64 - (5 * e2 ** 3) / 256) * lat -
-			((3 * e2) / 8 + (3 * e2 ** 2) / 32 + (45 * e2 ** 3) / 1024) * Math.sin(2 * lat) +
+			((3 * e2) / 8 + (3 * e2 ** 2) / 32 + (45 * e2 ** 3) / 1024) *
+				Math.sin(2 * lat) +
 			((15 * e2 ** 2) / 256 + (45 * e2 ** 3) / 1024) * Math.sin(4 * lat) -
 			((35 * e2 ** 3) / 3072) * Math.sin(6 * lat));
 
@@ -363,9 +401,7 @@ function sampleHeight(
 
 function getRasterHeightSample(runtime: TerrainRuntime, x: number, y: number) {
 	const index = y * runtime.metadata.width + x;
-	if (
-		runtime.heightCodes[index] === runtime.metadata.heightAsset.noDataCode
-	) {
+	if (runtime.heightCodes[index] === runtime.metadata.heightAsset.noDataCode) {
 		return null;
 	}
 
@@ -561,14 +597,18 @@ function projectTrackPoint(point: TrackPoint, runtime: TerrainRuntime) {
 	let projectedX = point.lon;
 	let projectedY = point.lat;
 
-	if (runtime.metadata.crs.kind === "projected" && runtime.metadata.crs.epsg === 25831) {
+	if (
+		runtime.metadata.crs.kind === "projected" &&
+		runtime.metadata.crs.epsg === 25831
+	) {
 		const projectedPoint = latLonToUtm31(point.lat, point.lon);
 		projectedX = projectedPoint.easting;
 		projectedY = projectedPoint.northing;
 	}
 
 	const normalizedX = (projectedX - bounds.west) / (bounds.east - bounds.west);
-	const normalizedY = (bounds.north - projectedY) / (bounds.north - bounds.south);
+	const normalizedY =
+		(bounds.north - projectedY) / (bounds.north - bounds.south);
 
 	if (
 		normalizedX < 0 ||
@@ -820,6 +860,69 @@ function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
 	controls.update();
 }
 
+function updateKeyboardNavigation(deltaSeconds: number) {
+	if (!terrainRuntime || pressedKeys.size === 0) {
+		return;
+	}
+
+	keyboardForward.subVectors(controls.target, camera.position);
+	keyboardForward.y = 0;
+	if (keyboardForward.lengthSq() < 1e-6) {
+		camera.getWorldDirection(keyboardForward);
+		keyboardForward.y = 0;
+	}
+
+	if (keyboardForward.lengthSq() < 1e-6) {
+		return;
+	}
+
+	keyboardForward.normalize();
+	keyboardRight.crossVectors(keyboardForward, camera.up).normalize();
+	keyboardOffset.set(0, 0, 0);
+
+	if (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp")) {
+		keyboardOffset.add(keyboardForward);
+	}
+	if (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown")) {
+		keyboardOffset.sub(keyboardForward);
+	}
+	if (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight")) {
+		keyboardOffset.add(keyboardRight);
+	}
+	if (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft")) {
+		keyboardOffset.sub(keyboardRight);
+	}
+	if (pressedKeys.has("KeyE") || pressedKeys.has("PageUp")) {
+		keyboardOffset.y += 1;
+	}
+	if (pressedKeys.has("KeyQ") || pressedKeys.has("PageDown")) {
+		keyboardOffset.y -= 1;
+	}
+
+	if (keyboardOffset.lengthSq() === 0) {
+		return;
+	}
+
+	const viewDistance = camera.position.distanceTo(controls.target);
+	const terrainSpan = Math.max(
+		terrainRuntime.metadata.sizeMeters.width,
+		terrainRuntime.metadata.sizeMeters.height,
+	);
+	const baseSpeed = THREE.MathUtils.clamp(
+		viewDistance * 1.45,
+		180,
+		terrainSpan * 0.24,
+	);
+	const speedMultiplier =
+		pressedKeys.has("ShiftLeft") || pressedKeys.has("ShiftRight") ? 2.5 : 1;
+	const movement = keyboardOffset
+		.normalize()
+		.multiplyScalar(baseSpeed * speedMultiplier * deltaSeconds);
+
+	camera.position.add(movement);
+	controls.target.add(movement);
+}
+
 function resizeRenderer() {
 	const { clientWidth, clientHeight } = canvas;
 	if (!clientWidth || !clientHeight) {
@@ -842,19 +945,48 @@ function updateStats(metadata: TerrainMetadata) {
 	boundsNode.textContent = formatBounds(metadata);
 }
 
-async function inflateHeightAsset(compressedBytes: Uint8Array) {
-	if ("DecompressionStream" in globalThis) {
-		const stream = new Blob([compressedBytes]).stream().pipeThrough(
-			new DecompressionStream("gzip"),
+function resolveAssetUrl(assetPath: string, baseUrl = document.baseURI) {
+	return new URL(assetPath, baseUrl).toString();
+}
+
+function toArrayBuffer(bytes: Uint8Array) {
+	return bytes.buffer.slice(
+		bytes.byteOffset,
+		bytes.byteOffset + bytes.byteLength,
+	);
+}
+
+function isGzipPayload(bytes: Uint8Array) {
+	return bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+}
+
+async function inflateHeightAsset(
+	compressedBytes: Uint8Array,
+	expectedByteLength: number,
+) {
+	if (!isGzipPayload(compressedBytes)) {
+		if (compressedBytes.byteLength === expectedByteLength) {
+			return toArrayBuffer(compressedBytes);
+		}
+
+		throw new Error(
+			`Terrain height asset is not gzip-encoded and has ${compressedBytes.byteLength} bytes, expected ${expectedByteLength}.`,
 		);
-		return await new Response(stream).arrayBuffer();
+	}
+
+	if ("DecompressionStream" in globalThis) {
+		try {
+			const stream = new Blob([compressedBytes])
+				.stream()
+				.pipeThrough(new DecompressionStream("gzip"));
+			return await new Response(stream).arrayBuffer();
+		} catch {
+			// Fall back to JS inflate for browsers/servers with inconsistent gzip handling.
+		}
 	}
 
 	const decompressed = gunzipSync(compressedBytes);
-	return decompressed.buffer.slice(
-		decompressed.byteOffset,
-		decompressed.byteOffset + decompressed.byteLength,
-	);
+	return toArrayBuffer(decompressed);
 }
 
 function getDirectChildrenByTag(parent: Element, tagName: string) {
@@ -1029,8 +1161,15 @@ async function handleTrackUpload(files: FileList | null) {
 }
 
 async function loadTerrain() {
+	if (window.location.protocol === "file:") {
+		throw new Error(
+			'Open the site through a local web server, not directly with file://. Use "npm run dev" or "npm run preview".',
+		);
+	}
+
 	statusNode.textContent = "Loading terrain metadata...";
-	const metadataResponse = await fetch("/data/terrain.json");
+	const metadataUrl = resolveAssetUrl("data/terrain.json");
+	const metadataResponse = await fetch(metadataUrl);
 	if (!metadataResponse.ok) {
 		throw new Error(
 			`Terrain metadata request failed with ${metadataResponse.status}.`,
@@ -1039,7 +1178,11 @@ async function loadTerrain() {
 	const metadata = (await metadataResponse.json()) as TerrainMetadata;
 
 	statusNode.textContent = "Loading terrain heightmap...";
-	const heightResponse = await fetch(metadata.heightAsset.url);
+	const heightAssetUrl = resolveAssetUrl(
+		metadata.heightAsset.url,
+		metadataResponse.url,
+	);
+	const heightResponse = await fetch(heightAssetUrl);
 	if (!heightResponse.ok) {
 		throw new Error(
 			`Terrain height asset request failed with ${heightResponse.status}.`,
@@ -1047,12 +1190,15 @@ async function loadTerrain() {
 	}
 
 	const compressedHeightBuffer = await heightResponse.arrayBuffer();
-	const rawHeightBuffer =
-		metadata.heightAsset.compression === "gzip"
-			? await inflateHeightAsset(new Uint8Array(compressedHeightBuffer))
-			: compressedHeightBuffer;
 	const expectedByteLength =
 		metadata.width * metadata.height * Uint16Array.BYTES_PER_ELEMENT;
+	const rawHeightBuffer =
+		metadata.heightAsset.compression === "gzip"
+			? await inflateHeightAsset(
+					new Uint8Array(compressedHeightBuffer),
+					expectedByteLength,
+				)
+			: compressedHeightBuffer;
 	if (rawHeightBuffer.byteLength !== expectedByteLength) {
 		throw new Error(
 			`Terrain height asset has ${rawHeightBuffer.byteLength} bytes, expected ${expectedByteLength}.`,
@@ -1109,7 +1255,9 @@ async function loadTerrain() {
 }
 
 function animate() {
+	const deltaSeconds = Math.min(clock.getDelta(), 0.1);
 	animationHandle = window.requestAnimationFrame(animate);
+	updateKeyboardNavigation(deltaSeconds);
 	controls.update();
 	renderer.render(scene, camera);
 }
@@ -1189,6 +1337,28 @@ resetButton.addEventListener("click", () => {
 const resizeObserver = new ResizeObserver(() => resizeRenderer());
 resizeObserver.observe(canvas);
 window.addEventListener("resize", resizeRenderer);
+window.addEventListener("keydown", (event) => {
+	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) {
+		return;
+	}
+
+	if (isEditableTarget(event.target)) {
+		return;
+	}
+
+	pressedKeys.add(event.code);
+	event.preventDefault();
+});
+window.addEventListener("keyup", (event) => {
+	if (!KEYBOARD_MOVE_CODES.has(event.code)) {
+		return;
+	}
+
+	pressedKeys.delete(event.code);
+});
+window.addEventListener("blur", () => {
+	pressedKeys.clear();
+});
 
 loadTerrain().catch((error) => {
 	statusNode.textContent =
