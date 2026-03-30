@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func Run(options Options) (Summary, error) {
@@ -25,6 +26,9 @@ func Run(options Options) (Summary, error) {
 	}
 	orthophotoPaths, err := discoverInputs(options.DataDir, resolveExplicitPaths(options.RepoRoot, options.OrthophotoFiles), orthophotoPattern, "orthophoto")
 	if err != nil {
+		return summary, err
+	}
+	if err := validateOutputSafety(options); err != nil {
 		return summary, err
 	}
 
@@ -212,6 +216,20 @@ func Run(options Options) (Summary, error) {
 	return summary, nil
 }
 
+func validateOutputSafety(options Options) error {
+	if len(options.DemFiles) == 0 && len(options.OrthophotoFiles) == 0 {
+		return nil
+	}
+	if !sameCleanPath(options.OutputDir, filepath.Join(options.RepoRoot, DefaultOutputDir)) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"subset input flags cannot write to %q; use a non-final --output-dir for smoke/test runs",
+		filepath.ToSlash(DefaultOutputDir),
+	)
+}
+
 func resolveExplicitPaths(repoRoot string, paths []string) []string {
 	resolved := make([]string, 0, len(paths))
 	for _, pathValue := range paths {
@@ -285,4 +303,8 @@ func encodeUint16LittleEndian(values []uint16) ([]byte, error) {
 		binary.LittleEndian.PutUint16(buffer[index*2:index*2+2], value)
 	}
 	return buffer, nil
+}
+
+func sameCleanPath(left, right string) bool {
+	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
 }

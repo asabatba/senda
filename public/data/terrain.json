@@ -1,27 +1,31 @@
 {
   "sourceFiles": [
+    "MDT02-ETRS89-HU31-0146-1-COB2.tif",
+    "MDT02-ETRS89-HU31-0146-3-COB2.tif",
+    "MDT02-ETRS89-HU31-0146-4-COB2.tif",
+    "MDT02-ETRS89-HU31-0178-1-COB2.tif",
     "MDT02-ETRS89-HU31-0178-2-COB2.tif"
   ],
-  "width": 256,
-  "height": 164,
+  "width": 1536,
+  "height": 1494,
   "crs": {
     "epsg": 25831,
     "kind": "projected",
     "units": "meter"
   },
   "bounds": {
-    "west": 251391,
+    "west": 238028,
     "south": 4719330,
-    "east": 266155,
-    "north": 4728776
+    "east": 266779,
+    "north": 4747288
   },
   "sizeMeters": {
-    "width": 14764,
-    "height": 9446
+    "width": 28751,
+    "height": 27958
   },
   "elevationRange": {
-    "min": 880.618,
-    "max": 3249.643
+    "min": 857.7,
+    "max": 3346.453
   },
   "heightAsset": {
     "url": "terrain-height.u16.bin.gz",
@@ -37,15 +41,19 @@
         "format": "rgba8",
         "compression": "gzip",
         "sourceFiles": [
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_1.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_3.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_4.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0178_1.tif",
           "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif"
         ],
         "width": 2048,
-        "height": 1310,
+        "height": 1991,
         "coverageBounds": {
-          "west": 252050,
+          "west": 238380,
           "south": 4719330,
-          "east": 266155,
-          "north": 4728280
+          "east": 266470,
+          "north": 4747288
         }
       },
       "4k": {
@@ -53,15 +61,19 @@
         "format": "rgba8",
         "compression": "gzip",
         "sourceFiles": [
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_1.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_3.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_4.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0178_1.tif",
           "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif"
         ],
         "width": 4096,
-        "height": 2621,
+        "height": 3983,
         "coverageBounds": {
-          "west": 252050,
+          "west": 238380,
           "south": 4719330,
-          "east": 266155,
-          "north": 4728280
+          "east": 266470,
+          "north": 4747288
         }
       },
       "8k": {
@@ -69,15 +81,19 @@
         "format": "rgba8",
         "compression": "gzip",
         "sourceFiles": [
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_1.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_3.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0146_4.tif",
+          "PNOA_MA_OF_ETRS89_HU31_h25_0178_1.tif",
           "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif"
         ],
         "width": 8192,
-        "height": 5241,
+        "height": 7966,
         "coverageBounds": {
-          "west": 252050,
+          "west": 238380,
           "south": 4719330,
-          "east": 266155,
-          "north": 4728280
+          "east": 266470,
+          "north": 4747288
         }
       }
     }
