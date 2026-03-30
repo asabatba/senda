@@ -37,6 +37,8 @@ type Options struct {
 	RepoRoot              string
 	DataDir               string
 	OutputDir             string
+	CacheDir              string
+	NoCache               bool
 	MaxEdge               int
 	DemFiles              []string
 	OrthophotoFiles       []string
@@ -54,9 +56,16 @@ type Summary struct {
 	SizeMeters          SizeMeters                  `json:"sizeMeters"`
 	ElevationRange      ElevationRange              `json:"elevationRange"`
 	GzippedHeightBytes  int                         `json:"gzippedHeightBytes"`
+	StageMilliseconds   map[string]int64            `json:"stageMilliseconds"`
+	CacheStats          map[string]CacheStat        `json:"cacheStats"`
 	ElapsedMilliseconds int64                       `json:"elapsedMilliseconds"`
 	Elapsed             string                      `json:"elapsed"`
 	OutputDir           string                      `json:"outputDir"`
+}
+
+type CacheStat struct {
+	Hits   int `json:"hits"`
+	Misses int `json:"misses"`
 }
 
 type OrthophotoReport struct {
@@ -149,6 +158,12 @@ type namedPlaceRecord struct {
 	X             float32
 	Y             float32
 	Z             float32
+}
+
+type orthophotoWindowCacheEntry struct {
+	Width  int
+	Height int
+	RGBA   []byte
 }
 
 type rasterMetadata struct {

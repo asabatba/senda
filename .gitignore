@@ -5,4 +5,4 @@ data/
 .codex-tmp
 
 gocache
-
+.terrainbuild-cache/

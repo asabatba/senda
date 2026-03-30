@@ -1,23 +1,42 @@
 package terrainbuild
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+	"sync"
+)
 
 func (s *orthophotoSource) GetName() string {
 	return s.Name
 }
 
-func buildOrthophotoMosaic(sources []*orthophotoSource, mergedBounds Bounds, targetSize Size) ([]byte, OrthophotoAsset, error) {
+func buildOrthophotoMosaic(
+	sources []*orthophotoSource,
+	mergedBounds Bounds,
+	targetSize Size,
+	cache *cacheManager,
+	options Options,
+) ([]byte, OrthophotoAsset, error) {
 	rgba := make([]byte, targetSize.Width*targetSize.Height*4)
 	var coverageBounds Bounds
 	var coverageSet bool
 	sourceFiles := make([]string, 0, len(sources))
+	type contribution struct {
+		index             int
+		sourceName        string
+		overlap           Bounds
+		destinationWindow Window
+		rgba              []byte
+		err               error
+	}
+	contributions := make([]contribution, len(sources))
+	var wg sync.WaitGroup
 
-	for _, source := range sources {
+	for index, source := range sources {
 		overlap, ok := intersectBounds(mergedBounds, source.Metadata.Bounds)
 		if !ok {
 			continue
 		}
-
 		sourceFiles = append(sourceFiles, source.Name)
 		if coverageSet {
 			coverageBounds = expandBounds(coverageBounds, overlap)
@@ -28,15 +47,33 @@ func buildOrthophotoMosaic(sources []*orthophotoSource, mergedBounds Bounds, tar
 
 		destinationWindow := computeDestinationWindow(overlap, mergedBounds, targetSize)
 		sourceWindow := computeSourceWindowForBounds(source.Metadata, overlap)
-		windowRGBA, err := source.Reader.ReadRGBWindowBilinear(sourceWindow, destinationWindow.Width, destinationWindow.Height)
-		if err != nil {
-			return nil, OrthophotoAsset{}, err
-		}
+		wg.Add(1)
+		go func(index int, source *orthophotoSource, overlap Bounds, destinationWindow Window, sourceWindow SourceWindow) {
+			defer wg.Done()
+			windowRGBA, err := loadCachedOrthophotoWindow(source, overlap, sourceWindow, destinationWindow, cache, options)
+			contributions[index] = contribution{
+				index:             index,
+				sourceName:        source.Name,
+				overlap:           overlap,
+				destinationWindow: destinationWindow,
+				rgba:              windowRGBA,
+				err:               err,
+			}
+		}(index, source, overlap, destinationWindow, sourceWindow)
+	}
+	wg.Wait()
 
-		for row := 0; row < destinationWindow.Height; row++ {
-			sourceOffset := row * destinationWindow.Width * 4
-			destOffset := ((destinationWindow.RowStart+row)*targetSize.Width + destinationWindow.ColStart) * 4
-			copy(rgba[destOffset:destOffset+destinationWindow.Width*4], windowRGBA[sourceOffset:sourceOffset+destinationWindow.Width*4])
+	for _, item := range contributions {
+		if item.err != nil {
+			return nil, OrthophotoAsset{}, item.err
+		}
+		if len(item.rgba) == 0 {
+			continue
+		}
+		for row := 0; row < item.destinationWindow.Height; row++ {
+			sourceOffset := row * item.destinationWindow.Width * 4
+			destOffset := ((item.destinationWindow.RowStart+row)*targetSize.Width + item.destinationWindow.ColStart) * 4
+			copy(rgba[destOffset:destOffset+item.destinationWindow.Width*4], item.rgba[sourceOffset:sourceOffset+item.destinationWindow.Width*4])
 		}
 	}
 
@@ -52,6 +89,59 @@ func buildOrthophotoMosaic(sources []*orthophotoSource, mergedBounds Bounds, tar
 		Height:         targetSize.Height,
 		CoverageBounds: coverageBounds,
 	}, nil
+}
+
+func loadCachedOrthophotoWindow(
+	source *orthophotoSource,
+	overlap Bounds,
+	sourceWindow SourceWindow,
+	destinationWindow Window,
+	cache *cacheManager,
+	options Options,
+) ([]uint8, error) {
+	fingerprint, err := fileFingerprint(source.Path)
+	if err != nil {
+		return nil, err
+	}
+	key := cacheKey(
+		"orthophoto-window-v1",
+		fingerprint,
+		formatBounds(overlap),
+		strconv.Itoa(sourceWindow.Left),
+		strconv.Itoa(sourceWindow.Top),
+		strconv.Itoa(sourceWindow.Right),
+		strconv.Itoa(sourceWindow.Bottom),
+		strconv.Itoa(destinationWindow.Width),
+		strconv.Itoa(destinationWindow.Height),
+		strconv.Itoa(options.MaxEdge),
+	)
+
+	var entry orthophotoWindowCacheEntry
+	if cache.loadGob("orthophoto", key, &entry) {
+		if entry.Width == destinationWindow.Width && entry.Height == destinationWindow.Height && len(entry.RGBA) == entry.Width*entry.Height*4 {
+			return entry.RGBA, nil
+		}
+	}
+
+	windowRGBA, err := source.Reader.ReadRGBWindowBilinear(sourceWindow, destinationWindow.Width, destinationWindow.Height)
+	if err != nil {
+		return nil, err
+	}
+	if err := cache.storeGob("orthophoto", key, orthophotoWindowCacheEntry{
+		Width:  destinationWindow.Width,
+		Height: destinationWindow.Height,
+		RGBA:   windowRGBA,
+	}); err != nil {
+		return nil, err
+	}
+	return windowRGBA, nil
+}
+
+func formatBounds(bounds Bounds) string {
+	return strconv.FormatFloat(bounds.West, 'f', 6, 64) + "|" +
+		strconv.FormatFloat(bounds.South, 'f', 6, 64) + "|" +
+		strconv.FormatFloat(bounds.East, 'f', 6, 64) + "|" +
+		strconv.FormatFloat(bounds.North, 'f', 6, 64)
 }
 
 func resizeRGBABilinear(source []byte, sourceWidth, sourceHeight, targetWidth, targetHeight int) []byte {

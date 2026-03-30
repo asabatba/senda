@@ -10,16 +10,31 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 func Run(options Options) (Summary, error) {
 	var summary Summary
 
+	stageTimings := make(map[string]int64)
+	stageStart := func() func(string) {
+		startedAt := time.Now()
+		return func(name string) {
+			stageTimings[name] = time.Since(startedAt).Milliseconds()
+		}
+	}
+
 	options, err := resolveOptions(options)
 	if err != nil {
 		return summary, err
 	}
+	cache, err := newCacheManager(options)
+	if err != nil {
+		return summary, err
+	}
 
+	stopStage := stageStart()
 	demPaths, err := discoverInputs(options.DataDir, resolveExplicitPaths(options.RepoRoot, options.DemFiles), demPattern, "DEM")
 	if err != nil {
 		return summary, err
@@ -31,60 +46,31 @@ func Run(options Options) (Summary, error) {
 	if err := validateOutputSafety(options); err != nil {
 		return summary, err
 	}
+	stopStage("inputDiscovery")
 
-	dems := make([]*demSource, 0, len(demPaths))
-	defer closeDEMReaders(dems)
-	var mergedBounds Bounds
-	var mergedBoundsSet bool
-	var noDataValue *float64
-
-	for _, path := range demPaths {
-		source, openErr := openDemSource(path)
-		if openErr != nil {
-			return summary, openErr
-		}
-		dems = append(dems, source)
-		if err := validateDEM(source, options.ExpectedDEMResolution); err != nil {
-			return summary, err
-		}
-		if source.Metadata.NoData != nil {
-			if noDataValue == nil {
-				copyValue := *source.Metadata.NoData
-				noDataValue = &copyValue
-			} else if math.Abs(*noDataValue-*source.Metadata.NoData) > 1e-6 {
-				return summary, fmt.Errorf("%s uses nodata %v, expected %v", source.Name, *source.Metadata.NoData, *noDataValue)
-			}
-		}
-		if mergedBoundsSet {
-			mergedBounds = expandBounds(mergedBounds, source.Metadata.Bounds)
-		} else {
-			mergedBounds = source.Metadata.Bounds
-			mergedBoundsSet = true
-		}
+	stopStage = stageStart()
+	dems, mergedBounds, noDataValue, err := openDEMSources(demPaths, options.ExpectedDEMResolution)
+	if err != nil {
+		return summary, err
 	}
+	defer closeDEMReaders(dems)
 	if noDataValue == nil {
 		defaultNoData := -32767.0
 		noDataValue = &defaultNoData
 	}
-
-	orthophotos := make([]*orthophotoSource, 0, len(orthophotoPaths))
-	defer closeOrthophotoReaders(orthophotos)
-	for _, path := range orthophotoPaths {
-		source, openErr := openOrthophotoSource(path)
-		if openErr != nil {
-			return summary, openErr
-		}
-		orthophotos = append(orthophotos, source)
-		if err := validateOrthophoto(source); err != nil {
-			return summary, err
-		}
+	orthophotos, err := openOrthophotoSources(orthophotoPaths)
+	if err != nil {
+		return summary, err
 	}
+	defer closeOrthophotoReaders(orthophotos)
+	stopStage("metadataProbe")
 
 	sourceWidth := int(math.Round((mergedBounds.East - mergedBounds.West) / options.ExpectedDEMResolution))
 	sourceHeight := int(math.Round((mergedBounds.North - mergedBounds.South) / options.ExpectedDEMResolution))
 	meshTargetSize := computeTargetSize(sourceWidth, sourceHeight, options.MaxEdge)
 
-	mergedRaster, validMask, err := buildDEMMosaic(dems, mergedBounds, float32(*noDataValue), meshTargetSize)
+	stopStage = stageStart()
+	mergedRaster, validMask, err := buildDEMMosaic(dems, mergedBounds, float32(*noDataValue), meshTargetSize, cache, options)
 	if err != nil {
 		return summary, err
 	}
@@ -92,6 +78,7 @@ func Run(options Options) (Summary, error) {
 	if err != nil {
 		return summary, err
 	}
+	stopStage("demMosaic")
 
 	largestPreset := options.OrthophotoPresets[0]
 	for _, preset := range options.OrthophotoPresets[1:] {
@@ -100,10 +87,12 @@ func Run(options Options) (Summary, error) {
 		}
 	}
 	largestTargetSize := computeTargetSize(sourceWidth, sourceHeight, largestPreset.MaxEdge)
-	masterRGBA, masterAsset, err := buildOrthophotoMosaic(orthophotos, mergedBounds, largestTargetSize)
+	stopStage = stageStart()
+	masterRGBA, masterAsset, err := buildOrthophotoMosaic(orthophotos, mergedBounds, largestTargetSize, cache, options)
 	if err != nil {
 		return summary, err
 	}
+	stopStage("orthophotoMaster")
 
 	if err := os.MkdirAll(options.OutputDir, 0o755); err != nil {
 		return summary, err
@@ -123,12 +112,13 @@ func Run(options Options) (Summary, error) {
 		return summary, err
 	}
 
+	stopStage = stageStart()
 	namedPlacesMetadata, namedPlacesBytes, err := buildNamedPlacesAsset(options, TerrainMetadata{
 		Width:      meshTargetSize.Width,
 		Height:     meshTargetSize.Height,
 		Bounds:     mergedBounds,
 		SizeMeters: SizeMeters{Width: mergedBounds.East - mergedBounds.West, Height: mergedBounds.North - mergedBounds.South},
-	}, mergedRaster, validMask)
+	}, mergedRaster, validMask, cache)
 	if err != nil {
 		return summary, err
 	}
@@ -139,42 +129,70 @@ func Run(options Options) (Summary, error) {
 	if err := os.WriteFile(filepath.Join(options.OutputDir, DefaultNamedPlacesAsset), gzippedNamedPlaces, 0o644); err != nil {
 		return summary, err
 	}
+	stopStage("namedPlaces")
 
+	stopStage = stageStart()
 	orthophotoMetadata := make(map[string]OrthophotoAsset, len(options.OrthophotoPresets))
 	summaryPresets := make(map[string]OrthophotoReport, len(options.OrthophotoPresets))
-	for _, preset := range options.OrthophotoPresets {
-		targetSize := computeTargetSize(sourceWidth, sourceHeight, preset.MaxEdge)
-		rgba := masterRGBA
-		if targetSize.Width != masterAsset.Width || targetSize.Height != masterAsset.Height {
-			rgba = resizeRGBABilinear(masterRGBA, masterAsset.Width, masterAsset.Height, targetSize.Width, targetSize.Height)
-		}
-		gzippedRGBA, gzipErr := gzipBytes(rgba)
-		if gzipErr != nil {
-			return summary, gzipErr
-		}
-		filename := orthophotoOutputFile(preset.ID)
-		if err := os.WriteFile(filepath.Join(options.OutputDir, filename), gzippedRGBA, 0o644); err != nil {
-			return summary, err
-		}
-
-		asset := OrthophotoAsset{
-			URL:            filename,
-			Format:         "rgba8",
-			Compression:    "gzip",
-			SourceFiles:    append([]string(nil), masterAsset.SourceFiles...),
-			Width:          targetSize.Width,
-			Height:         targetSize.Height,
-			CoverageBounds: masterAsset.CoverageBounds,
-		}
-		orthophotoMetadata[preset.ID] = asset
-		summaryPresets[preset.ID] = OrthophotoReport{
-			Width:          asset.Width,
-			Height:         asset.Height,
-			GzippedBytes:   len(gzippedRGBA),
-			CoverageBounds: asset.CoverageBounds,
-		}
+	type presetResult struct {
+		id     string
+		asset  OrthophotoAsset
+		report OrthophotoReport
+		err    error
 	}
+	presetResults := make([]presetResult, len(options.OrthophotoPresets))
+	var presetWG sync.WaitGroup
+	for index, preset := range options.OrthophotoPresets {
+		presetWG.Add(1)
+		go func(index int, preset OrthophotoPreset) {
+			defer presetWG.Done()
+			targetSize := computeTargetSize(sourceWidth, sourceHeight, preset.MaxEdge)
+			rgba := masterRGBA
+			if targetSize.Width != masterAsset.Width || targetSize.Height != masterAsset.Height {
+				rgba = resizeRGBABilinear(masterRGBA, masterAsset.Width, masterAsset.Height, targetSize.Width, targetSize.Height)
+			}
+			gzippedRGBA, err := gzipBytes(rgba)
+			if err != nil {
+				presetResults[index].err = err
+				return
+			}
+			filename := orthophotoOutputFile(preset.ID)
+			if err := os.WriteFile(filepath.Join(options.OutputDir, filename), gzippedRGBA, 0o644); err != nil {
+				presetResults[index].err = err
+				return
+			}
+			asset := OrthophotoAsset{
+				URL:            filename,
+				Format:         "rgba8",
+				Compression:    "gzip",
+				SourceFiles:    append([]string(nil), masterAsset.SourceFiles...),
+				Width:          targetSize.Width,
+				Height:         targetSize.Height,
+				CoverageBounds: masterAsset.CoverageBounds,
+			}
+			presetResults[index] = presetResult{
+				id:    preset.ID,
+				asset: asset,
+				report: OrthophotoReport{
+					Width:          asset.Width,
+					Height:         asset.Height,
+					GzippedBytes:   len(gzippedRGBA),
+					CoverageBounds: asset.CoverageBounds,
+				},
+			}
+		}(index, preset)
+	}
+	presetWG.Wait()
+	for _, result := range presetResults {
+		if result.err != nil {
+			return summary, result.err
+		}
+		orthophotoMetadata[result.id] = result.asset
+		summaryPresets[result.id] = result.report
+	}
+	stopStage("orthophotoPresets")
 
+	stopStage = stageStart()
 	metadata := TerrainMetadata{
 		SourceFiles: collectNames(dems),
 		Width:       meshTargetSize.Width,
@@ -215,6 +233,7 @@ func Run(options Options) (Summary, error) {
 	if err := os.WriteFile(filepath.Join(options.OutputDir, DefaultMetadataFile), metadataBytes, 0o644); err != nil {
 		return summary, err
 	}
+	stopStage("metadataWrite")
 
 	relativeOutput, err := filepath.Rel(options.RepoRoot, options.OutputDir)
 	if err != nil {
@@ -230,9 +249,15 @@ func Run(options Options) (Summary, error) {
 		SizeMeters:         metadata.SizeMeters,
 		ElevationRange:     metadata.ElevationRange,
 		GzippedHeightBytes: len(gzippedHeights),
+		StageMilliseconds:  stageTimings,
+		CacheStats:         cache.summary(),
 		OutputDir:          filepath.ToSlash(relativeOutput),
 	}
 	return summary, nil
+}
+
+func errNoDataMismatch(source *demSource, expected float64) error {
+	return fmt.Errorf("%s uses nodata %v, expected %v", source.Name, *source.Metadata.NoData, expected)
 }
 
 func validateOutputSafety(options Options) error {
@@ -302,7 +327,7 @@ func collectNames[T interface{ GetName() string }](sources []T) []string {
 
 func gzipBytes(data []byte) ([]byte, error) {
 	var buffer bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&buffer, gzip.BestCompression)
+	writer, err := gzip.NewWriterLevel(&buffer, DefaultGzipLevel)
 	if err != nil {
 		return nil, err
 	}

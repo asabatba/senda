@@ -1,6 +1,7 @@
 package terrainbuild
 
 import (
+	"compress/gzip"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 const (
 	DefaultDataDir              = "data"
 	DefaultOutputDir            = "public/data"
+	DefaultCacheDir             = ".terrainbuild-cache"
 	DefaultHeightAsset          = "terrain-height.u16.bin.gz"
 	DefaultHeightAssetRaw       = "terrain-height.u16.bin"
 	DefaultMetadataFile         = "terrain.json"
@@ -20,6 +22,7 @@ const (
 	DefaultDEMResolution        = 2.0
 	DefaultOrthophotoPresetID   = "8k"
 	DefaultGMLDir               = "NGBE_gml"
+	DefaultGzipLevel            = gzip.BestSpeed
 )
 
 var DefaultOrthophotoPresets = []OrthophotoPreset{
@@ -50,6 +53,9 @@ func resolveOptions(options Options) (Options, error) {
 	if options.OutputDir == "" {
 		options.OutputDir = DefaultOutputDir
 	}
+	if options.CacheDir == "" {
+		options.CacheDir = DefaultCacheDir
+	}
 	if options.MaxEdge == 0 {
 		options.MaxEdge = DefaultMaxEdge
 	}
@@ -69,6 +75,7 @@ func resolveOptions(options Options) (Options, error) {
 	options.RepoRoot = filepath.Clean(options.RepoRoot)
 	options.DataDir = resolvePath(options.RepoRoot, options.DataDir)
 	options.OutputDir = resolvePath(options.RepoRoot, options.OutputDir)
+	options.CacheDir = resolvePath(options.RepoRoot, options.CacheDir)
 
 	return options, nil
 }

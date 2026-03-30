@@ -55,8 +55,9 @@ func buildNamedPlacesAsset(
 	metadata TerrainMetadata,
 	mergedRaster []float32,
 	validMask []uint8,
+	cache *cacheManager,
 ) (*NamedPlacesAsset, []byte, error) {
-	features, err := collectNamedPlaces(options, metadata, mergedRaster, validMask)
+	features, err := collectNamedPlaces(options, metadata, mergedRaster, validMask, cache)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -90,6 +91,7 @@ func collectNamedPlaces(
 	metadata TerrainMetadata,
 	mergedRaster []float32,
 	validMask []uint8,
+	cache *cacheManager,
 ) ([]namedPlaceRecord, error) {
 	gmlDir := filepath.Join(options.DataDir, DefaultGMLDir)
 	paths, err := discoverNamedPlaceInputs(gmlDir, naturalNamedPlaceCategories)
@@ -104,7 +106,7 @@ func collectNamedPlaces(
 	}
 
 	for _, path := range paths {
-		candidates, err := parseNamedPlacesGML(path)
+		candidates, err := loadCachedNamedPlaceCandidates(path, cache)
 		if err != nil {
 			return nil, err
 		}
@@ -157,6 +159,30 @@ func collectNamedPlaces(
 	})
 
 	return records, nil
+}
+
+func loadCachedNamedPlaceCandidates(path string, cache *cacheManager) ([]namedPlaceCandidate, error) {
+	fingerprint, err := fileFingerprint(path)
+	if err != nil {
+		return nil, err
+	}
+	key := cacheKey("named-places-gml-v1", fingerprint)
+
+	var entry namedPlaceCandidatesCacheEntry
+	if cache.loadGob("namedPlaces", key, &entry) {
+		return entry.Candidates, nil
+	}
+
+	candidates, err := parseNamedPlacesGML(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cache.storeGob("namedPlaces", key, namedPlaceCandidatesCacheEntry{
+		Candidates: candidates,
+	}); err != nil {
+		return nil, err
+	}
+	return candidates, nil
 }
 
 func discoverNamedPlaceInputs(gmlDir string, categories []string) ([]string, error) {

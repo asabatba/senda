@@ -47,6 +47,8 @@ func main() {
 	var orthophotoFiles stringListFlag
 	dataDir := flag.String("data-dir", terrainbuild.DefaultDataDir, "Directory containing source GeoTIFFs.")
 	outputDir := flag.String("output-dir", terrainbuild.DefaultOutputDir, "Directory for generated browser assets.")
+	cacheDir := flag.String("cache-dir", terrainbuild.DefaultCacheDir, "Directory for persistent terrain-build cache.")
+	noCache := flag.Bool("no-cache", false, "Disable persistent terrain-build cache for this run.")
 	maxEdge := flag.Int("max-edge", maxEdgeDefault, "Maximum mesh edge length.")
 	flag.Var(&demFiles, "dem-file", "Specific DEM GeoTIFF to include. Repeatable.")
 	flag.Var(&orthophotoFiles, "orthophoto-file", "Specific orthophoto GeoTIFF to include. Repeatable.")
@@ -57,6 +59,8 @@ func main() {
 		RepoRoot:        filepath.Clean(repoRoot),
 		DataDir:         *dataDir,
 		OutputDir:       *outputDir,
+		CacheDir:        *cacheDir,
+		NoCache:         *noCache,
 		MaxEdge:         *maxEdge,
 		DemFiles:        demFiles,
 		OrthophotoFiles: orthophotoFiles,

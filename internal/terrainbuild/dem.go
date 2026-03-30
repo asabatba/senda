@@ -3,19 +3,27 @@ package terrainbuild
 import (
 	"fmt"
 	"math"
+	"strconv"
 )
 
 func (s *demSource) GetName() string {
 	return s.Name
 }
 
-func buildDEMMosaic(sources []*demSource, mergedBounds Bounds, noDataValue float32, targetSize Size) ([]float32, []uint8, error) {
+func buildDEMMosaic(
+	sources []*demSource,
+	mergedBounds Bounds,
+	noDataValue float32,
+	targetSize Size,
+	cache *cacheManager,
+	options Options,
+) ([]float32, []uint8, error) {
 	merged := make([]float32, targetSize.Width*targetSize.Height)
 	validMask := make([]uint8, targetSize.Width*targetSize.Height)
 
 	for _, source := range sources {
 		window := computeDestinationWindow(source.Metadata.Bounds, mergedBounds, targetSize)
-		raster, err := source.Reader.ReadFullFloat32()
+		raster, err := loadCachedDEMRaster(source, cache, options)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -37,6 +45,40 @@ func buildDEMMosaic(sources []*demSource, mergedBounds Bounds, noDataValue float
 	}
 
 	return merged, validMask, nil
+}
+
+func loadCachedDEMRaster(source *demSource, cache *cacheManager, options Options) ([]float32, error) {
+	fingerprint, err := fileFingerprint(source.Path)
+	if err != nil {
+		return nil, err
+	}
+	key := cacheKey(
+		"dem-raster-v1",
+		fingerprint,
+		strconv.Itoa(source.Metadata.Width),
+		strconv.Itoa(source.Metadata.Height),
+		strconv.FormatFloat(options.ExpectedDEMResolution, 'f', 6, 64),
+	)
+
+	var entry demRasterCacheEntry
+	if cache.loadGob("dem", key, &entry) {
+		if entry.Width == source.Metadata.Width && entry.Height == source.Metadata.Height && len(entry.Raster) == entry.Width*entry.Height {
+			return entry.Raster, nil
+		}
+	}
+
+	raster, err := source.Reader.ReadFullFloat32()
+	if err != nil {
+		return nil, err
+	}
+	if err := cache.storeGob("dem", key, demRasterCacheEntry{
+		Width:  source.Metadata.Width,
+		Height: source.Metadata.Height,
+		Raster: raster,
+	}); err != nil {
+		return nil, err
+	}
+	return raster, nil
 }
 
 func encodeHeights(mergedRaster []float32, validMask []uint8) ([]uint16, ElevationRange, error) {
