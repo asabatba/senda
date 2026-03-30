@@ -7,6 +7,13 @@ import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 
+type TerrainBounds = {
+	west: number;
+	south: number;
+	east: number;
+	north: number;
+};
+
 type TerrainMetadata = {
 	sourceFiles: string[];
 	width: number;
@@ -16,12 +23,7 @@ type TerrainMetadata = {
 		kind: "projected" | "geographic";
 		units: "meter" | "degree";
 	};
-	bounds: {
-		west: number;
-		south: number;
-		east: number;
-		north: number;
-	};
+	bounds: TerrainBounds;
 	sizeMeters: {
 		width: number;
 		height: number;
@@ -36,6 +38,13 @@ type TerrainMetadata = {
 		compression: "gzip" | "none";
 		noDataCode: 0;
 	};
+	orthophotoAsset: {
+		url: string;
+		format: "rgba8";
+		compression: "gzip" | "none";
+		sourceFile: string;
+		coverageBounds: TerrainBounds;
+	} | null;
 	defaultVerticalExaggeration: number;
 	overlay: {
 		url: string | null;
@@ -131,10 +140,10 @@ app.innerHTML = `
       </div>
     </section>
     <aside class="panel">
-      <p class="eyebrow">Pyrenees DEM</p>
+      <p class="eyebrow">Pyrenees DEM + PNOA</p>
       <h1>Terrain Viewer</h1>
       <p class="lede">
-        Preprocessed from the source GeoTIFF into a lightweight height asset for fast interactive exploration.
+        Preprocessed DEM heights and PNOA orthophoto imagery are draped into lightweight browser assets for fast interactive exploration.
       </p>
 
       <p class="status" data-status>Loading terrain assets...</p>
@@ -554,6 +563,45 @@ function createReliefCanvas(heights: Float32Array, metadata: TerrainMetadata) {
 	return canvasElement;
 }
 
+function createCanvasFromRgbaPixels(
+	pixels: Uint8Array,
+	width: number,
+	height: number,
+	label: string,
+) {
+	const canvasElement = document.createElement("canvas");
+	canvasElement.width = width;
+	canvasElement.height = height;
+	const context = canvasElement.getContext("2d");
+	if (!context) {
+		throw new Error(`Failed to create a 2D canvas for the ${label}.`);
+	}
+
+	const imageData = context.createImageData(width, height);
+	imageData.data.set(pixels);
+	context.putImageData(imageData, 0, 0);
+	return canvasElement;
+}
+
+function compositeOrthophoto(
+	reliefCanvas: HTMLCanvasElement,
+	metadata: TerrainMetadata,
+	orthophotoPixels: Uint8Array,
+) {
+	const context = reliefCanvas.getContext("2d");
+	if (!context) {
+		throw new Error("Failed to access the relief texture canvas.");
+	}
+
+	const overlayCanvas = createCanvasFromRgbaPixels(
+		orthophotoPixels,
+		metadata.width,
+		metadata.height,
+		"orthophoto texture",
+	);
+	context.drawImage(overlayCanvas, 0, 0);
+}
+
 function applyVerticalExaggeration(
 	geometry: THREE.PlaneGeometry,
 	heights: Float32Array,
@@ -570,8 +618,12 @@ function applyVerticalExaggeration(
 async function buildSurfaceTexture(
 	metadata: TerrainMetadata,
 	heights: Float32Array,
+	orthophotoPixels: Uint8Array | null,
 ) {
 	const reliefCanvas = createReliefCanvas(heights, metadata);
+	if (orthophotoPixels) {
+		compositeOrthophoto(reliefCanvas, metadata, orthophotoPixels);
+	}
 
 	const texture = new THREE.CanvasTexture(reliefCanvas);
 	texture.colorSpace = THREE.SRGBColorSpace;
@@ -936,10 +988,13 @@ function resizeRenderer() {
 }
 
 function updateStats(metadata: TerrainMetadata) {
-	sourceNode.textContent =
+	const demSource =
 		metadata.sourceFiles.length === 1
 			? metadata.sourceFiles[0]
 			: `${metadata.sourceFiles.length} DEM tiles`;
+	sourceNode.textContent = metadata.orthophotoAsset
+		? `${demSource} + ${metadata.orthophotoAsset.sourceFile}`
+		: demSource;
 	footprintNode.textContent = `${formatDistance(metadata.sizeMeters.width)} x ${formatDistance(metadata.sizeMeters.height)}`;
 	elevationRangeNode.textContent = `${metadata.elevationRange.min.toFixed(0)} m to ${metadata.elevationRange.max.toFixed(0)} m`;
 	boundsNode.textContent = formatBounds(metadata);
@@ -960,9 +1015,10 @@ function isGzipPayload(bytes: Uint8Array) {
 	return bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 }
 
-async function inflateHeightAsset(
+async function inflateBinaryAsset(
 	compressedBytes: Uint8Array,
 	expectedByteLength: number,
+	label: string,
 ) {
 	if (!isGzipPayload(compressedBytes)) {
 		if (compressedBytes.byteLength === expectedByteLength) {
@@ -970,7 +1026,7 @@ async function inflateHeightAsset(
 		}
 
 		throw new Error(
-			`Terrain height asset is not gzip-encoded and has ${compressedBytes.byteLength} bytes, expected ${expectedByteLength}.`,
+			`${label} is not gzip-encoded and has ${compressedBytes.byteLength} bytes, expected ${expectedByteLength}.`,
 		);
 	}
 
@@ -1194,9 +1250,10 @@ async function loadTerrain() {
 		metadata.width * metadata.height * Uint16Array.BYTES_PER_ELEMENT;
 	const rawHeightBuffer =
 		metadata.heightAsset.compression === "gzip"
-			? await inflateHeightAsset(
+			? await inflateBinaryAsset(
 					new Uint8Array(compressedHeightBuffer),
 					expectedByteLength,
+					"Terrain height asset",
 				)
 			: compressedHeightBuffer;
 	if (rawHeightBuffer.byteLength !== expectedByteLength) {
@@ -1205,10 +1262,48 @@ async function loadTerrain() {
 		);
 	}
 
+	let orthophotoPixels: Uint8Array | null = null;
+	if (metadata.orthophotoAsset) {
+		statusNode.textContent = "Loading orthophoto imagery...";
+		const orthophotoAssetUrl = resolveAssetUrl(
+			metadata.orthophotoAsset.url,
+			metadataResponse.url,
+		);
+		const orthophotoResponse = await fetch(orthophotoAssetUrl);
+		if (!orthophotoResponse.ok) {
+			throw new Error(
+				`Terrain orthophoto asset request failed with ${orthophotoResponse.status}.`,
+			);
+		}
+
+		const compressedOrthophotoBuffer = await orthophotoResponse.arrayBuffer();
+		const expectedOrthophotoByteLength = metadata.width * metadata.height * 4;
+		const rawOrthophotoBuffer =
+			metadata.orthophotoAsset.compression === "gzip"
+				? await inflateBinaryAsset(
+						new Uint8Array(compressedOrthophotoBuffer),
+						expectedOrthophotoByteLength,
+						"Terrain orthophoto asset",
+					)
+				: compressedOrthophotoBuffer;
+
+		if (rawOrthophotoBuffer.byteLength !== expectedOrthophotoByteLength) {
+			throw new Error(
+				`Terrain orthophoto asset has ${rawOrthophotoBuffer.byteLength} bytes, expected ${expectedOrthophotoByteLength}.`,
+			);
+		}
+
+		orthophotoPixels = new Uint8Array(rawOrthophotoBuffer);
+	}
+
 	statusNode.textContent = "Preparing 3D terrain...";
 	const heightCodes = new Uint16Array(rawHeightBuffer);
 	const heights = buildHeightArray(heightCodes, metadata);
-	const surfaceTexture = await buildSurfaceTexture(metadata, heights);
+	const surfaceTexture = await buildSurfaceTexture(
+		metadata,
+		heights,
+		orthophotoPixels,
+	);
 	const geometry = new THREE.PlaneGeometry(
 		metadata.sizeMeters.width,
 		metadata.sizeMeters.height,
@@ -1251,7 +1346,9 @@ async function loadTerrain() {
 	statsNode.hidden = false;
 	renderTrackList();
 	statusNode.textContent =
-		"Terrain ready. Upload a GPX file to overlay a track.";
+		metadata.orthophotoAsset
+			? "Terrain ready. Orthophoto imagery is draped where available; upload a GPX file to overlay a track."
+			: "Terrain ready. Upload a GPX file to overlay a track.";
 }
 
 function animate() {

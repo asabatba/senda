@@ -7,6 +7,7 @@ import { fromFile } from 'geotiff';
 
 const DATA_DIR = 'data';
 const DEM_TILE_PATTERN = /^MDT02-ETRS89-HU31-.*\.tif$/i;
+const ORTHOPHOTO_FILE = 'PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif';
 const DEFAULT_MAX_EDGE = 1536;
 const DEFAULT_VERTICAL_EXAGGERATION = 1.0;
 const EXPECTED_EPSG = 25831;
@@ -16,11 +17,15 @@ const OUTPUT_DIR = path.join('public', 'data');
 const OUTPUT_HEIGHTS = 'terrain-height.u16.bin.gz';
 const OUTPUT_HEIGHTS_RAW = 'terrain-height.u16.bin';
 const OUTPUT_METADATA = 'terrain.json';
-const OUTPUT_ORTHO = 'terrain-ortho.webp';
+const OUTPUT_ORTHO = 'terrain-ortho.rgba.bin.gz';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
 
 function parseNoData(image) {
   const rawValue = image.getGDALNoData?.();
@@ -52,6 +57,13 @@ function assertResolution(image, label) {
   }
 }
 
+function assertRgbOrthophoto(image, label) {
+  const samplesPerPixel = image.getSamplesPerPixel();
+  if (samplesPerPixel < 3) {
+    throw new Error(`${label} must have at least 3 samples per pixel, received ${samplesPerPixel}.`);
+  }
+}
+
 function computeBounds(image) {
   const bbox = image.getBoundingBox?.();
   if (!bbox || bbox.length !== 4) {
@@ -73,6 +85,21 @@ function expandBounds(accumulator, bounds) {
     east: Math.max(accumulator.east, bounds.east),
     north: Math.max(accumulator.north, bounds.north),
   };
+}
+
+function intersectBounds(a, b) {
+  const overlap = {
+    west: Math.max(a.west, b.west),
+    south: Math.max(a.south, b.south),
+    east: Math.min(a.east, b.east),
+    north: Math.min(a.north, b.north),
+  };
+
+  if (overlap.east <= overlap.west || overlap.north <= overlap.south) {
+    return null;
+  }
+
+  return overlap;
 }
 
 function computeTargetSize(sourceWidth, sourceHeight, maxEdge) {
@@ -130,6 +157,37 @@ function computeDestinationWindow(tileBounds, mergedBounds, targetSize) {
   };
 }
 
+function computeSourceWindowForBounds(image, imageBounds, bounds) {
+  const [resolutionX, resolutionY] = image.getResolution();
+  const pixelWidth = Math.abs(resolutionX);
+  const pixelHeight = Math.abs(resolutionY);
+  const imageWidth = image.getWidth();
+  const imageHeight = image.getHeight();
+
+  const left = clamp(
+    Math.floor((bounds.west - imageBounds.west) / pixelWidth),
+    0,
+    imageWidth - 1,
+  );
+  const right = clamp(
+    Math.ceil((bounds.east - imageBounds.west) / pixelWidth),
+    left + 1,
+    imageWidth,
+  );
+  const top = clamp(
+    Math.floor((imageBounds.north - bounds.north) / pixelHeight),
+    0,
+    imageHeight - 1,
+  );
+  const bottom = clamp(
+    Math.ceil((imageBounds.north - bounds.south) / pixelHeight),
+    top + 1,
+    imageHeight,
+  );
+
+  return [left, top, right, bottom];
+}
+
 async function discoverTiles() {
   const dataDir = path.resolve(repoRoot, DATA_DIR);
   const entries = await fs.readdir(dataDir);
@@ -179,6 +237,72 @@ async function discoverTiles() {
   };
 }
 
+async function discoverOrthophoto() {
+  const dataDir = path.resolve(repoRoot, DATA_DIR);
+  const orthophotoPath = path.join(dataDir, ORTHOPHOTO_FILE);
+
+  await fs.access(orthophotoPath);
+
+  const image = await (await fromFile(orthophotoPath)).getImage();
+  assertProjectedCrs(image, ORTHOPHOTO_FILE);
+  assertRgbOrthophoto(image, ORTHOPHOTO_FILE);
+
+  return {
+    name: ORTHOPHOTO_FILE,
+    path: orthophotoPath,
+    image,
+    bounds: computeBounds(image),
+  };
+}
+
+async function buildOrthophotoAsset(orthophoto, mergedBounds, targetSize) {
+  const coverageBounds = intersectBounds(mergedBounds, orthophoto.bounds);
+  if (!coverageBounds) {
+    return null;
+  }
+
+  const destinationWindow = computeDestinationWindow(coverageBounds, mergedBounds, targetSize);
+  const sourceWindow = computeSourceWindowForBounds(orthophoto.image, orthophoto.bounds, coverageBounds);
+  const rgb = await orthophoto.image.readRGB({
+    window: sourceWindow,
+    width: destinationWindow.width,
+    height: destinationWindow.height,
+    interleave: true,
+    resampleMethod: 'bilinear',
+  });
+
+  const rgba = new Uint8Array(targetSize.width * targetSize.height * 4);
+
+  for (let row = 0; row < destinationWindow.height; row += 1) {
+    const sourceOffset = row * destinationWindow.width * 3;
+    const destinationOffset =
+      ((destinationWindow.rowStart + row) * targetSize.width + destinationWindow.colStart) * 4;
+
+    for (let col = 0; col < destinationWindow.width; col += 1) {
+      const rgbOffset = sourceOffset + col * 3;
+      const rgbaOffset = destinationOffset + col * 4;
+      rgba[rgbaOffset] = rgb[rgbOffset];
+      rgba[rgbaOffset + 1] = rgb[rgbOffset + 1];
+      rgba[rgbaOffset + 2] = rgb[rgbOffset + 2];
+      rgba[rgbaOffset + 3] = 255;
+    }
+  }
+
+  const rgbaBuffer = Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+  const gzippedRgba = gzipSync(rgbaBuffer, { level: 9 });
+
+  return {
+    bytes: gzippedRgba,
+    metadata: {
+      url: OUTPUT_ORTHO,
+      format: 'rgba8',
+      compression: 'gzip',
+      sourceFile: orthophoto.name,
+      coverageBounds,
+    },
+  };
+}
+
 async function main() {
   const maxEdge = Number.parseInt(process.env.TERRAIN_MAX_EDGE ?? String(DEFAULT_MAX_EDGE), 10);
   if (!Number.isFinite(maxEdge) || maxEdge < 2) {
@@ -187,6 +311,7 @@ async function main() {
 
   const outputDir = path.resolve(repoRoot, OUTPUT_DIR);
   const { tiles, mergedBounds, noDataValue } = await discoverTiles();
+  const orthophoto = await discoverOrthophoto();
   const sourceWidth = Math.round((mergedBounds.east - mergedBounds.west) / EXPECTED_RESOLUTION);
   const sourceHeight = Math.round((mergedBounds.north - mergedBounds.south) / EXPECTED_RESOLUTION);
   const targetSize = computeTargetSize(sourceWidth, sourceHeight, maxEdge);
@@ -254,6 +379,7 @@ async function main() {
     encodedHeights[index] = Math.min(65535, Math.max(1, Math.round(normalized * 65534) + 1));
   }
 
+  const orthophotoAsset = await buildOrthophotoAsset(orthophoto, mergedBounds, targetSize);
   const heightBuffer = Buffer.from(encodedHeights.buffer, encodedHeights.byteOffset, encodedHeights.byteLength);
   const gzippedHeights = gzipSync(heightBuffer, { level: 9 });
 
@@ -281,6 +407,7 @@ async function main() {
       compression: 'gzip',
       noDataCode: 0,
     },
+    orthophotoAsset: orthophotoAsset?.metadata ?? null,
     defaultVerticalExaggeration: DEFAULT_VERTICAL_EXAGGERATION,
     overlay: {
       url: null,
@@ -288,10 +415,15 @@ async function main() {
   };
 
   await fs.mkdir(outputDir, { recursive: true });
-  await fs.rm(path.join(outputDir, OUTPUT_ORTHO), { force: true });
   await fs.rm(path.join(outputDir, OUTPUT_HEIGHTS_RAW), { force: true });
   await fs.writeFile(path.join(outputDir, OUTPUT_HEIGHTS), gzippedHeights);
   await fs.writeFile(path.join(outputDir, OUTPUT_METADATA), `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
+
+  if (orthophotoAsset) {
+    await fs.writeFile(path.join(outputDir, OUTPUT_ORTHO), orthophotoAsset.bytes);
+  } else {
+    await fs.rm(path.join(outputDir, OUTPUT_ORTHO), { force: true });
+  }
 
   console.log(
     JSON.stringify(
@@ -301,7 +433,9 @@ async function main() {
         targetHeight: metadata.height,
         sizeMeters: metadata.sizeMeters,
         elevationRange: metadata.elevationRange,
-        gzippedBytes: gzippedHeights.length,
+        gzippedHeightBytes: gzippedHeights.length,
+        gzippedOrthophotoBytes: orthophotoAsset?.bytes.length ?? 0,
+        orthophotoCoverageBounds: orthophotoAsset?.metadata.coverageBounds ?? null,
         outputDir: path.relative(repoRoot, outputDir),
       },
       null,
