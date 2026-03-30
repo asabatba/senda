@@ -47,6 +47,13 @@ const featurePosition = new THREE.Vector3();
 const projected = new THREE.Vector3();
 const terrainCenter = new THREE.Vector3(0, 0, 0);
 
+function getLocalFeatureHeight(
+	feature: NamedPlaceFeature,
+	baseElevation: number,
+) {
+	return feature.y - baseElevation;
+}
+
 function decodeUtf8(bytes: Uint8Array) {
 	return new TextDecoder().decode(bytes);
 }
@@ -166,6 +173,7 @@ export function createNamedPlaceOverlay(
 		NamedPlaceFeature[]
 	>;
 	const labelElements: HTMLDivElement[] = [];
+	const baseElevation = metadata.elevationRange.min;
 
 	for (const category of CATEGORY_BY_ID) {
 		const categoryFeatures = features.filter(
@@ -178,7 +186,8 @@ export function createNamedPlaceOverlay(
 		categoryFeatures.forEach((feature, index) => {
 			positions[index * 3] = feature.x;
 			positions[index * 3 + 1] =
-				feature.y * metadata.defaultVerticalExaggeration +
+				getLocalFeatureHeight(feature, baseElevation) *
+					metadata.defaultVerticalExaggeration +
 				NAMED_PLACE_MARKER_SURFACE_OFFSET;
 			positions[index * 3 + 2] = feature.z;
 		});
@@ -220,6 +229,7 @@ export function createNamedPlaceOverlay(
 		featuresByCategory,
 		features,
 		labelElements,
+		baseElevation,
 	};
 }
 
@@ -243,8 +253,11 @@ export function updateNamedPlaceOverlay(
 	for (let index = 0; index < overlay.features.length; index += 1) {
 		const feature = overlay.features[index];
 		const markerY =
-			feature.y * exaggeration + NAMED_PLACE_MARKER_SURFACE_OFFSET;
-		const labelY = feature.y * exaggeration + NAMED_PLACE_LABEL_SURFACE_OFFSET;
+			getLocalFeatureHeight(feature, overlay.baseElevation) * exaggeration +
+			NAMED_PLACE_MARKER_SURFACE_OFFSET;
+		const labelY =
+			getLocalFeatureHeight(feature, overlay.baseElevation) * exaggeration +
+			NAMED_PLACE_LABEL_SURFACE_OFFSET;
 
 		featurePosition.set(feature.x, labelY, feature.z);
 		projected.copy(featurePosition).project(camera);

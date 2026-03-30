@@ -94,6 +94,7 @@ export type NamedPlaceOverlay = {
 	featuresByCategory: Record<NamedPlaceCategory, NamedPlaceFeature[]>;
 	features: NamedPlaceFeature[];
 	labelElements: HTMLDivElement[];
+	baseElevation: number;
 };
 
 export type TerrainRuntime = {
