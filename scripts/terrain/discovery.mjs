@@ -8,7 +8,7 @@ import {
 	DEM_TILE_PATTERN,
 	EXPECTED_EPSG,
 	EXPECTED_RESOLUTION,
-	ORTHOPHOTO_FILE,
+	ORTHOPHOTO_PATTERN,
 } from "./config.mjs";
 import {
 	assertProjectedCrs,
@@ -76,20 +76,32 @@ export async function discoverTiles(repoRoot) {
 	};
 }
 
-export async function discoverOrthophoto(repoRoot) {
+export async function discoverOrthophotos(repoRoot) {
 	const dataDir = path.resolve(repoRoot, DATA_DIR);
-	const orthophotoPath = path.join(dataDir, ORTHOPHOTO_FILE);
+	const entries = await fs.readdir(dataDir);
+	const orthophotoNames = entries
+		.filter((name) => ORTHOPHOTO_PATTERN.test(name))
+		.sort();
 
-	await fs.access(orthophotoPath);
+	if (orthophotoNames.length === 0) {
+		throw new Error(
+			`No orthophotos matching ${ORTHOPHOTO_PATTERN} were found in "${DATA_DIR}".`,
+		);
+	}
 
-	const image = await (await fromFile(orthophotoPath)).getImage();
-	assertProjectedCrs(image, ORTHOPHOTO_FILE, EXPECTED_EPSG);
-	assertRgbOrthophoto(image, ORTHOPHOTO_FILE);
+	return Promise.all(
+		orthophotoNames.map(async (orthophotoName) => {
+			const orthophotoPath = path.join(dataDir, orthophotoName);
+			const image = await (await fromFile(orthophotoPath)).getImage();
+			assertProjectedCrs(image, orthophotoName, EXPECTED_EPSG);
+			assertRgbOrthophoto(image, orthophotoName);
 
-	return {
-		name: ORTHOPHOTO_FILE,
-		path: orthophotoPath,
-		image,
-		bounds: computeBounds(image),
-	};
+			return {
+				name: orthophotoName,
+				path: orthophotoPath,
+				image,
+				bounds: computeBounds(image),
+			};
+		}),
+	);
 }

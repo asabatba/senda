@@ -20,7 +20,7 @@ export type OrthophotoPresetAsset = {
 	url: string;
 	format: "rgba8";
 	compression: "gzip" | "none";
-	sourceFile: string;
+	sourceFiles: string[];
 	width: number;
 	height: number;
 	coverageBounds: TerrainBounds;

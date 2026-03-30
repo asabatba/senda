@@ -209,6 +209,16 @@ function formatPresetLabel(presetId: OrthophotoPresetId) {
 	return presetId.toUpperCase();
 }
 
+function formatOrthophotoSourceLabel(
+	metadata: TerrainMetadata,
+	currentPreset: OrthophotoPresetId,
+) {
+	const orthophotoSources = metadata.orthophoto.presets[currentPreset].sourceFiles;
+	return orthophotoSources.length === 1
+		? orthophotoSources[0]
+		: `${orthophotoSources.length} orthophotos`;
+}
+
 function isEditableTarget(target: EventTarget | null) {
 	if (!(target instanceof HTMLElement)) {
 		return false;
@@ -569,7 +579,7 @@ function updateStats(
 		metadata.sourceFiles.length === 1
 			? metadata.sourceFiles[0]
 			: `${metadata.sourceFiles.length} DEM tiles`;
-	sourceNode.textContent = `${demSource} + ${metadata.orthophoto.presets[currentPreset].sourceFile} (${formatPresetLabel(currentPreset)})`;
+	sourceNode.textContent = `${demSource} + ${formatOrthophotoSourceLabel(metadata, currentPreset)} (${formatPresetLabel(currentPreset)})`;
 	footprintNode.textContent = `${formatDistance(metadata.sizeMeters.width)} x ${formatDistance(metadata.sizeMeters.height)}`;
 	elevationRangeNode.textContent = `${metadata.elevationRange.min.toFixed(0)} m to ${metadata.elevationRange.max.toFixed(0)} m`;
 	boundsNode.textContent = formatBounds(metadata);

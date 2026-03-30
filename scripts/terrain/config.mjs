@@ -2,7 +2,7 @@ import path from "node:path";
 
 export const DATA_DIR = "data";
 export const DEM_TILE_PATTERN = /^MDT02-ETRS89-HU31-.*\.tif$/i;
-export const ORTHOPHOTO_FILE = "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif";
+export const ORTHOPHOTO_PATTERN = /^PNOA_MA_OF_ETRS89_HU31_h25_.*\.tif$/i;
 export const DEFAULT_MAX_EDGE = 1536;
 export const DEFAULT_VERTICAL_EXAGGERATION = 1.0;
 export const EXPECTED_EPSG = 25831;

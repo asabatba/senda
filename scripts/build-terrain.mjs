@@ -16,9 +16,13 @@ import {
 	OUTPUT_METADATA,
 } from "./terrain/config.mjs";
 import { buildDemRaster, encodeHeights } from "./terrain/dem.mjs";
-import { discoverOrthophoto, discoverTiles } from "./terrain/discovery.mjs";
+import { discoverOrthophotos, discoverTiles } from "./terrain/discovery.mjs";
 import { computeTargetSize } from "./terrain/geotiff-utils.mjs";
-import { buildOrthophotoAsset } from "./terrain/orthophoto.mjs";
+import {
+	buildOrthophotoRaster,
+	encodeOrthophotoAsset,
+	resizeRgbaBilinear,
+} from "./terrain/orthophoto.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,7 +47,7 @@ async function main() {
 
 	const outputDir = path.resolve(repoRoot, OUTPUT_DIR);
 	const { tiles, mergedBounds, noDataValue } = await discoverTiles(repoRoot);
-	const orthophoto = await discoverOrthophoto(repoRoot);
+	const orthophotos = await discoverOrthophotos(repoRoot);
 	const sourceWidth = Math.round(
 		(mergedBounds.east - mergedBounds.west) / EXPECTED_RESOLUTION,
 	);
@@ -63,29 +67,56 @@ async function main() {
 		validMask,
 	);
 
-	const orthophotoAssets = await Promise.all(
-		ORTHOPHOTO_PRESETS.map(async (preset) => {
-			const targetSize = computeTargetSize(
-				sourceWidth,
-				sourceHeight,
-				preset.maxEdge,
-			);
-			const asset = await buildOrthophotoAsset(
-				orthophoto,
-				mergedBounds,
-				targetSize,
-				getOrthophotoOutputFile(preset.id),
-			);
-			if (!asset) {
-				throw new Error(`Failed to build orthophoto preset "${preset.id}".`);
-			}
-
-			return {
-				id: preset.id,
-				asset,
-			};
-		}),
+	const largestOrthophotoPreset = ORTHOPHOTO_PRESETS.reduce((largest, preset) =>
+		preset.maxEdge > largest.maxEdge ? preset : largest,
 	);
+	const largestTargetSize = computeTargetSize(
+		sourceWidth,
+		sourceHeight,
+		largestOrthophotoPreset.maxEdge,
+	);
+	const masterOrthophotoRaster = await buildOrthophotoRaster(
+		orthophotos,
+		mergedBounds,
+		largestTargetSize,
+	);
+	if (!masterOrthophotoRaster) {
+		throw new Error("Failed to build orthophoto mosaic.");
+	}
+
+	const orthophotoAssets = [];
+	for (const preset of ORTHOPHOTO_PRESETS) {
+		const targetSize = computeTargetSize(
+			sourceWidth,
+			sourceHeight,
+			preset.maxEdge,
+		);
+		const rgba =
+			targetSize.width === masterOrthophotoRaster.metadata.width &&
+			targetSize.height === masterOrthophotoRaster.metadata.height
+				? masterOrthophotoRaster.rgba
+				: resizeRgbaBilinear(
+						masterOrthophotoRaster.rgba,
+						masterOrthophotoRaster.metadata.width,
+						masterOrthophotoRaster.metadata.height,
+						targetSize.width,
+						targetSize.height,
+					);
+		const asset = encodeOrthophotoAsset(
+			rgba,
+			{
+				...masterOrthophotoRaster.metadata,
+				width: targetSize.width,
+				height: targetSize.height,
+			},
+			getOrthophotoOutputFile(preset.id),
+		);
+
+		orthophotoAssets.push({
+			id: preset.id,
+			asset,
+		});
+	}
 
 	const heightBuffer = Buffer.from(
 		encodedHeights.buffer,
