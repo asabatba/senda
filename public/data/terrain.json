@@ -1,87 +1,89 @@
 {
-	"sourceFiles": [
-		"MDT02-ETRS89-HU31-0146-1-COB2.tif",
-		"MDT02-ETRS89-HU31-0146-3-COB2.tif",
-		"MDT02-ETRS89-HU31-0146-4-COB2.tif",
-		"MDT02-ETRS89-HU31-0178-1-COB2.tif",
-		"MDT02-ETRS89-HU31-0178-2-COB2.tif"
-	],
-	"width": 1536,
-	"height": 1494,
-	"crs": {
-		"epsg": 25831,
-		"kind": "projected",
-		"units": "meter"
-	},
-	"bounds": {
-		"west": 238028,
-		"south": 4719330,
-		"east": 266779,
-		"north": 4747288
-	},
-	"sizeMeters": {
-		"width": 28751,
-		"height": 27958
-	},
-	"elevationRange": {
-		"min": 858.158,
-		"max": 3345.994
-	},
-	"heightAsset": {
-		"url": "terrain-height.u16.bin.gz",
-		"format": "uint16",
-		"compression": "gzip",
-		"noDataCode": 0
-	},
-	"orthophoto": {
-		"defaultPreset": "8k",
-		"presets": {
-			"2k": {
-				"url": "terrain-ortho-2k.rgba.bin.gz",
-				"format": "rgba8",
-				"compression": "gzip",
-				"sourceFile": "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif",
-				"width": 2048,
-				"height": 1991,
-				"coverageBounds": {
-					"west": 252050,
-					"south": 4719330,
-					"east": 266194,
-					"north": 4728280
-				}
-			},
-			"4k": {
-				"url": "terrain-ortho-4k.rgba.bin.gz",
-				"format": "rgba8",
-				"compression": "gzip",
-				"sourceFile": "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif",
-				"width": 4096,
-				"height": 3983,
-				"coverageBounds": {
-					"west": 252050,
-					"south": 4719330,
-					"east": 266194,
-					"north": 4728280
-				}
-			},
-			"8k": {
-				"url": "terrain-ortho-8k.rgba.bin.gz",
-				"format": "rgba8",
-				"compression": "gzip",
-				"sourceFile": "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif",
-				"width": 8192,
-				"height": 7966,
-				"coverageBounds": {
-					"west": 252050,
-					"south": 4719330,
-					"east": 266194,
-					"north": 4728280
-				}
-			}
-		}
-	},
-	"defaultVerticalExaggeration": 1,
-	"overlay": {
-		"url": null
-	}
+  "sourceFiles": [
+    "MDT02-ETRS89-HU31-0178-2-COB2.tif"
+  ],
+  "width": 256,
+  "height": 164,
+  "crs": {
+    "epsg": 25831,
+    "kind": "projected",
+    "units": "meter"
+  },
+  "bounds": {
+    "west": 251391,
+    "south": 4719330,
+    "east": 266155,
+    "north": 4728776
+  },
+  "sizeMeters": {
+    "width": 14764,
+    "height": 9446
+  },
+  "elevationRange": {
+    "min": 880.618,
+    "max": 3249.643
+  },
+  "heightAsset": {
+    "url": "terrain-height.u16.bin.gz",
+    "format": "uint16",
+    "compression": "gzip",
+    "noDataCode": 0
+  },
+  "orthophoto": {
+    "defaultPreset": "8k",
+    "presets": {
+      "2k": {
+        "url": "terrain-ortho-2k.rgba.bin.gz",
+        "format": "rgba8",
+        "compression": "gzip",
+        "sourceFiles": [
+          "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif"
+        ],
+        "width": 2048,
+        "height": 1310,
+        "coverageBounds": {
+          "west": 252050,
+          "south": 4719330,
+          "east": 266155,
+          "north": 4728280
+        }
+      },
+      "4k": {
+        "url": "terrain-ortho-4k.rgba.bin.gz",
+        "format": "rgba8",
+        "compression": "gzip",
+        "sourceFiles": [
+          "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif"
+        ],
+        "width": 4096,
+        "height": 2621,
+        "coverageBounds": {
+          "west": 252050,
+          "south": 4719330,
+          "east": 266155,
+          "north": 4728280
+        }
+      },
+      "8k": {
+        "url": "terrain-ortho-8k.rgba.bin.gz",
+        "format": "rgba8",
+        "compression": "gzip",
+        "sourceFiles": [
+          "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif"
+        ],
+        "width": 8192,
+        "height": 5241,
+        "coverageBounds": {
+          "west": 252050,
+          "south": 4719330,
+          "east": 266155,
+          "north": 4728280
+        }
+      }
+    }
+  },
+  "defaultVerticalExaggeration": 1,
+  "overlay": {
+    "url": null
+  }
 }

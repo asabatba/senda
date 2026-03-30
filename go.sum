@@ -1,0 +1,4 @@
+github.com/gden173/geotiff v0.0.1 h1:blQrpimkOXRHj3P2hPFexOR4rle1cgYazj0u/U7GhoI=
+github.com/gden173/geotiff v0.0.1/go.mod h1:r5Y8WAARfF8mYPm8cqWKNIayjsX2FDZlcjG7GBAXMGg=
+github.com/google/tiff v0.0.0-20161109161721-4b31f3041d9a h1:Mi5lnNcpqYN2M2J52gy1uknSRhfA9BBAPVBd5XfHi+U=
+github.com/google/tiff v0.0.0-20161109161721-4b31f3041d9a/go.mod h1:gpYY+jaYz1cbbiPKT9p2ReLdpBTvTRqoKwJ21LdEk+4=
