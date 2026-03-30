@@ -46,14 +46,17 @@ type Options struct {
 }
 
 type Summary struct {
-	Sources            []string                    `json:"sources"`
-	MeshWidth          int                         `json:"meshWidth"`
-	MeshHeight         int                         `json:"meshHeight"`
-	OrthophotoPresets  map[string]OrthophotoReport `json:"orthophotoPresets"`
-	SizeMeters         SizeMeters                  `json:"sizeMeters"`
-	ElevationRange     ElevationRange              `json:"elevationRange"`
-	GzippedHeightBytes int                         `json:"gzippedHeightBytes"`
-	OutputDir          string                      `json:"outputDir"`
+	Sources             []string                    `json:"sources"`
+	MeshWidth           int                         `json:"meshWidth"`
+	MeshHeight          int                         `json:"meshHeight"`
+	OrthophotoPresets   map[string]OrthophotoReport `json:"orthophotoPresets"`
+	NamedPlaceCount     int                         `json:"namedPlaceCount"`
+	SizeMeters          SizeMeters                  `json:"sizeMeters"`
+	ElevationRange      ElevationRange              `json:"elevationRange"`
+	GzippedHeightBytes  int                         `json:"gzippedHeightBytes"`
+	ElapsedMilliseconds int64                       `json:"elapsedMilliseconds"`
+	Elapsed             string                      `json:"elapsed"`
+	OutputDir           string                      `json:"outputDir"`
 }
 
 type OrthophotoReport struct {
@@ -100,6 +103,7 @@ type TerrainMetadata struct {
 	ElevationRange              ElevationRange     `json:"elevationRange"`
 	HeightAsset                 HeightAsset        `json:"heightAsset"`
 	Orthophoto                  OrthophotoMetadata `json:"orthophoto"`
+	NamedPlaces                 *NamedPlacesAsset  `json:"namedPlaces"`
 	DefaultVerticalExaggeration float64            `json:"defaultVerticalExaggeration"`
 	Overlay                     OverlayMetadata    `json:"overlay"`
 }
@@ -117,6 +121,34 @@ type OrthophotoMetadata struct {
 
 type OverlayMetadata struct {
 	URL *string `json:"url"`
+}
+
+type NamedPlacesAsset struct {
+	URL          string                            `json:"url"`
+	Format       string                            `json:"format"`
+	Compression  string                            `json:"compression"`
+	FeatureCount int                               `json:"featureCount"`
+	Categories   map[string]NamedPlaceCategoryInfo `json:"categories"`
+}
+
+type NamedPlaceCategoryInfo struct {
+	Label string `json:"label"`
+	Count int    `json:"count"`
+	Color string `json:"color"`
+}
+
+type namedPlaceRecord struct {
+	ID            string
+	Name          string
+	LocalType     string
+	Category      string
+	CategoryID    uint8
+	Easting       float64
+	Northing      float64
+	TerrainHeight float32
+	X             float32
+	Y             float32
+	Z             float32
 }
 
 type rasterMetadata struct {

@@ -4,6 +4,7 @@ import type {
 	Mesh,
 	MeshStandardMaterial,
 	PlaneGeometry,
+	Points,
 } from "three";
 import type { Line2 } from "three/examples/jsm/lines/Line2.js";
 
@@ -15,6 +16,7 @@ export type TerrainBounds = {
 };
 
 export type OrthophotoPresetId = "2k" | "4k" | "8k";
+export type NamedPlaceCategory = "hydrography" | "landform" | "protectedSite";
 
 export type OrthophotoPresetAsset = {
 	url: string;
@@ -54,10 +56,44 @@ export type TerrainMetadata = {
 		defaultPreset: OrthophotoPresetId;
 		presets: Record<OrthophotoPresetId, OrthophotoPresetAsset>;
 	};
+	namedPlaces: NamedPlaceAsset | null;
 	defaultVerticalExaggeration: number;
 	overlay: {
 		url: string | null;
 	};
+};
+
+export type NamedPlaceCategoryInfo = {
+	label: string;
+	count: number;
+	color: string;
+};
+
+export type NamedPlaceAsset = {
+	url: string;
+	format: "named-place-v1";
+	compression: "gzip" | "none";
+	featureCount: number;
+	categories: Record<NamedPlaceCategory, NamedPlaceCategoryInfo>;
+};
+
+export type NamedPlaceFeature = {
+	x: number;
+	y: number;
+	z: number;
+	name: string;
+	localType: string | null;
+	category: NamedPlaceCategory;
+	categoryId: number;
+};
+
+export type NamedPlaceOverlay = {
+	group: Group;
+	markersByCategory: Record<NamedPlaceCategory, Points>;
+	markerBuffersByCategory: Record<NamedPlaceCategory, Float32Array>;
+	featuresByCategory: Record<NamedPlaceCategory, NamedPlaceFeature[]>;
+	features: NamedPlaceFeature[];
+	labelElements: HTMLDivElement[];
 };
 
 export type TerrainRuntime = {
@@ -69,6 +105,7 @@ export type TerrainRuntime = {
 	assetsBaseUrl: string;
 	currentExaggeration: number;
 	currentOrthophotoPreset: OrthophotoPresetId;
+	namedPlaceOverlay: NamedPlaceOverlay | null;
 };
 
 export type TrackPoint = {

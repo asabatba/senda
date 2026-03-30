@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gpx3d2/internal/terrainbuild"
 )
@@ -51,6 +52,7 @@ func main() {
 	flag.Var(&orthophotoFiles, "orthophoto-file", "Specific orthophoto GeoTIFF to include. Repeatable.")
 	flag.Parse()
 
+	startedAt := time.Now()
 	summary, err := terrainbuild.Run(terrainbuild.Options{
 		RepoRoot:        filepath.Clean(repoRoot),
 		DataDir:         *dataDir,
@@ -63,6 +65,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	elapsed := time.Since(startedAt)
+	summary.ElapsedMilliseconds = elapsed.Milliseconds()
+	summary.Elapsed = elapsed.Round(time.Millisecond).String()
 
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")

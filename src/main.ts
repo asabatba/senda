@@ -11,6 +11,12 @@ import { KEYBOARD_MOVE_CODES, TRACK_COLORS } from "./terrain/constants";
 import { formatBounds, formatCount, formatDistance } from "./terrain/format";
 import { parseGpxSegments } from "./terrain/gpx";
 import { applyVerticalExaggeration, buildHeightArray } from "./terrain/heights";
+import {
+	createNamedPlaceOverlay,
+	disposeNamedPlaceOverlay,
+	loadNamedPlaceFeatures,
+	updateNamedPlaceOverlay,
+} from "./terrain/named-places";
 import { buildSurfaceTexture } from "./terrain/texture";
 import {
 	buildLinePositions,
@@ -60,7 +66,7 @@ app.innerHTML = `
 
         <label class="control">
           <span>Vertical exaggeration</span>
-          <input type="range" min="0.8" max="3.2" step="0.1" data-exaggeration />
+          <input type="range" min="0.8" max="2" step="0.1" data-exaggeration />
           <strong data-exaggeration-value></strong>
         </label>
 
@@ -79,6 +85,14 @@ app.innerHTML = `
           </div>
           <p class="track-empty" data-track-empty>No GPX tracks uploaded yet.</p>
           <ul class="track-list" data-track-list></ul>
+        </section>
+
+        <section class="track-section" data-named-place-legend hidden>
+          <div class="track-heading">
+            <span>Natural features</span>
+            <strong data-named-place-count>0</strong>
+          </div>
+          <ul class="track-list named-place-legend" data-named-place-list></ul>
         </section>
 
         <button class="reset-button" type="button" data-reset-camera>Reset camera</button>
@@ -107,6 +121,7 @@ app.innerHTML = `
 `;
 
 const canvas = app.querySelector<HTMLCanvasElement>("canvas.viewer");
+const viewerOverlay = app.querySelector<HTMLElement>(".viewer-overlay");
 const statusNode = app.querySelector<HTMLElement>("[data-status]");
 const controlsNode = app.querySelector<HTMLElement>("[data-controls]");
 const statsNode = app.querySelector<HTMLElement>("[data-stats]");
@@ -130,6 +145,15 @@ const trackFeedbackNode = app.querySelector<HTMLElement>(
 const trackCountNode = app.querySelector<HTMLElement>("[data-track-count]");
 const trackEmptyNode = app.querySelector<HTMLElement>("[data-track-empty]");
 const trackListNode = app.querySelector<HTMLUListElement>("[data-track-list]");
+const namedPlaceLegendNode = app.querySelector<HTMLElement>(
+	"[data-named-place-legend]",
+);
+const namedPlaceCountNode = app.querySelector<HTMLElement>(
+	"[data-named-place-count]",
+);
+const namedPlaceListNode = app.querySelector<HTMLUListElement>(
+	"[data-named-place-list]",
+);
 const sourceNode = app.querySelector<HTMLElement>("[data-source]");
 const footprintNode = app.querySelector<HTMLElement>("[data-footprint]");
 const elevationRangeNode = app.querySelector<HTMLElement>(
@@ -139,6 +163,7 @@ const boundsNode = app.querySelector<HTMLElement>("[data-bounds]");
 
 if (
 	!canvas ||
+	!viewerOverlay ||
 	!statusNode ||
 	!controlsNode ||
 	!statsNode ||
@@ -152,6 +177,9 @@ if (
 	!trackCountNode ||
 	!trackEmptyNode ||
 	!trackListNode ||
+	!namedPlaceLegendNode ||
+	!namedPlaceCountNode ||
+	!namedPlaceListNode ||
 	!sourceNode ||
 	!footprintNode ||
 	!elevationRangeNode ||
@@ -213,7 +241,8 @@ function formatOrthophotoSourceLabel(
 	metadata: TerrainMetadata,
 	currentPreset: OrthophotoPresetId,
 ) {
-	const orthophotoSources = metadata.orthophoto.presets[currentPreset].sourceFiles;
+	const orthophotoSources =
+		metadata.orthophoto.presets[currentPreset].sourceFiles;
 	return orthophotoSources.length === 1
 		? orthophotoSources[0]
 		: `${orthophotoSources.length} orthophotos`;
@@ -477,6 +506,47 @@ function renderTrackList() {
 	);
 	trackCountNode.textContent = String(trackOverlays.length);
 	trackEmptyNode.hidden = trackOverlays.length > 0;
+}
+
+function renderNamedPlaceLegend(metadata: TerrainMetadata) {
+	if (!metadata.namedPlaces) {
+		namedPlaceLegendNode.hidden = true;
+		namedPlaceListNode.replaceChildren();
+		namedPlaceCountNode.textContent = "0";
+		return;
+	}
+
+	const categories = Object.entries(metadata.namedPlaces.categories).filter(
+		([, info]) => info.count > 0,
+	);
+	namedPlaceCountNode.textContent = String(metadata.namedPlaces.featureCount);
+	namedPlaceListNode.replaceChildren(
+		...categories.map(([category, info]) => {
+			const item = document.createElement("li");
+			item.className = "track-item named-place-legend-item";
+
+			const swatch = document.createElement("span");
+			swatch.className = "track-swatch";
+			swatch.style.backgroundColor = info.color;
+
+			const label = document.createElement("strong");
+			label.className = "track-name";
+			label.textContent = info.label;
+
+			const meta = document.createElement("p");
+			meta.className = "track-meta";
+			meta.textContent = `${info.count} visible labels`;
+
+			const row = document.createElement("div");
+			row.className = "track-name-wrap";
+			row.append(swatch, label);
+
+			item.append(row, meta);
+			item.dataset.category = category;
+			return item;
+		}),
+	);
+	namedPlaceLegendNode.hidden = categories.length === 0;
 }
 
 function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
@@ -807,6 +877,9 @@ async function loadTerrain() {
 		selectedPreset,
 		metadataResponse.url,
 	);
+	const namedPlaceFeatures = metadata.namedPlaces
+		? await loadNamedPlaceFeatures(metadata, metadataResponse.url)
+		: [];
 
 	setStatus("Preparing 3D terrain...");
 	const heightCodes = new Uint16Array(rawHeightBuffer);
@@ -840,6 +913,14 @@ async function loadTerrain() {
 	const mesh = new THREE.Mesh(geometry, material);
 	scene.add(mesh);
 
+	const namedPlaceOverlay =
+		namedPlaceFeatures.length > 0
+			? createNamedPlaceOverlay(namedPlaceFeatures, metadata, viewerOverlay)
+			: null;
+	if (namedPlaceOverlay) {
+		scene.add(namedPlaceOverlay.group);
+	}
+
 	terrainRuntime = {
 		mesh,
 		geometry,
@@ -849,21 +930,31 @@ async function loadTerrain() {
 		assetsBaseUrl: metadataResponse.url,
 		currentExaggeration: metadata.defaultVerticalExaggeration,
 		currentOrthophotoPreset: selectedPreset,
+		namedPlaceOverlay,
 	};
 
 	exaggerationInput.value = metadata.defaultVerticalExaggeration.toFixed(1);
 	exaggerationValue.textContent = `${metadata.defaultVerticalExaggeration.toFixed(1)}x`;
 	updateStats(metadata, selectedPreset);
+	renderNamedPlaceLegend(metadata);
 	persistPresetSelection(selectedPreset);
 	resetCamera(metadata, metadata.defaultVerticalExaggeration);
 	resizeRenderer();
+	if (namedPlaceOverlay) {
+		updateNamedPlaceOverlay(
+			namedPlaceOverlay,
+			metadata.defaultVerticalExaggeration,
+			camera,
+			canvas,
+		);
+	}
 
 	controlsNode.hidden = false;
 	statsNode.hidden = false;
 	orthophotoPresetSelect.disabled = false;
 	renderTrackList();
 	setStatus(
-		`Terrain ready. ${formatPresetLabel(selectedPreset)} orthophoto loaded; upload a GPX file to overlay a track.`,
+		`Terrain ready. ${formatPresetLabel(selectedPreset)} orthophoto and natural-feature overlay loaded; upload a GPX file to overlay a track.`,
 	);
 }
 
@@ -872,6 +963,14 @@ function animate() {
 	animationHandle = window.requestAnimationFrame(animate);
 	updateKeyboardNavigation(deltaSeconds);
 	controls.update();
+	if (terrainRuntime?.namedPlaceOverlay) {
+		updateNamedPlaceOverlay(
+			terrainRuntime.namedPlaceOverlay,
+			terrainRuntime.currentExaggeration,
+			camera,
+			canvas,
+		);
+	}
 	renderer.render(scene, camera);
 }
 
@@ -902,6 +1001,14 @@ exaggerationInput.addEventListener("input", () => {
 		exaggeration,
 	);
 	syncTrackOverlayGeometries(exaggeration);
+	if (terrainRuntime.namedPlaceOverlay) {
+		updateNamedPlaceOverlay(
+			terrainRuntime.namedPlaceOverlay,
+			exaggeration,
+			camera,
+			canvas,
+		);
+	}
 	exaggerationValue.textContent = `${exaggeration.toFixed(1)}x`;
 });
 
@@ -1003,6 +1110,9 @@ window.addEventListener("beforeunload", () => {
 	renderer.dispose();
 	for (const overlay of trackOverlays) {
 		disposeTrackOverlay(overlay);
+	}
+	if (terrainRuntime?.namedPlaceOverlay) {
+		disposeNamedPlaceOverlay(terrainRuntime.namedPlaceOverlay);
 	}
 	const material = terrainRuntime?.mesh.material;
 	material?.map?.dispose();

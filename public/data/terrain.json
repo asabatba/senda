@@ -98,6 +98,29 @@
       }
     }
   },
+  "namedPlaces": {
+    "url": "terrain-named-places.bin.gz",
+    "format": "named-place-v1",
+    "compression": "gzip",
+    "featureCount": 701,
+    "categories": {
+      "hydrography": {
+        "label": "Hydrography",
+        "count": 196,
+        "color": "#6bd3ff"
+      },
+      "landform": {
+        "label": "Landform",
+        "count": 504,
+        "color": "#f0d36f"
+      },
+      "protectedSite": {
+        "label": "Protected site",
+        "count": 1,
+        "color": "#7fe08b"
+      }
+    }
+  },
   "defaultVerticalExaggeration": 1,
   "overlay": {
     "url": null

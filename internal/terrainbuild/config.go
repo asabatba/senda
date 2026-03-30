@@ -12,12 +12,14 @@ const (
 	DefaultHeightAsset          = "terrain-height.u16.bin.gz"
 	DefaultHeightAssetRaw       = "terrain-height.u16.bin"
 	DefaultMetadataFile         = "terrain.json"
+	DefaultNamedPlacesAsset     = "terrain-named-places.bin.gz"
 	LegacyOrthophotoAsset       = "terrain-ortho.rgba.bin.gz"
 	DefaultMaxEdge              = 1536
 	DefaultVerticalExaggeration = 1.0
 	ExpectedEPSG                = 25831
 	DefaultDEMResolution        = 2.0
 	DefaultOrthophotoPresetID   = "8k"
+	DefaultGMLDir               = "NGBE_gml"
 )
 
 var DefaultOrthophotoPresets = []OrthophotoPreset{

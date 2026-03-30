@@ -123,6 +123,23 @@ func Run(options Options) (Summary, error) {
 		return summary, err
 	}
 
+	namedPlacesMetadata, namedPlacesBytes, err := buildNamedPlacesAsset(options, TerrainMetadata{
+		Width:      meshTargetSize.Width,
+		Height:     meshTargetSize.Height,
+		Bounds:     mergedBounds,
+		SizeMeters: SizeMeters{Width: mergedBounds.East - mergedBounds.West, Height: mergedBounds.North - mergedBounds.South},
+	}, mergedRaster, validMask)
+	if err != nil {
+		return summary, err
+	}
+	gzippedNamedPlaces, err := gzipBytes(namedPlacesBytes)
+	if err != nil {
+		return summary, err
+	}
+	if err := os.WriteFile(filepath.Join(options.OutputDir, DefaultNamedPlacesAsset), gzippedNamedPlaces, 0o644); err != nil {
+		return summary, err
+	}
+
 	orthophotoMetadata := make(map[string]OrthophotoAsset, len(options.OrthophotoPresets))
 	summaryPresets := make(map[string]OrthophotoReport, len(options.OrthophotoPresets))
 	for _, preset := range options.OrthophotoPresets {
@@ -183,6 +200,7 @@ func Run(options Options) (Summary, error) {
 			DefaultPreset: options.DefaultOrthophotoID,
 			Presets:       orthophotoMetadata,
 		},
+		NamedPlaces:                 namedPlacesMetadata,
 		DefaultVerticalExaggeration: DefaultVerticalExaggeration,
 		Overlay: OverlayMetadata{
 			URL: nil,
@@ -208,6 +226,7 @@ func Run(options Options) (Summary, error) {
 		MeshWidth:          metadata.Width,
 		MeshHeight:         metadata.Height,
 		OrthophotoPresets:  summaryPresets,
+		NamedPlaceCount:    namedPlacesMetadata.FeatureCount,
 		SizeMeters:         metadata.SizeMeters,
 		ElevationRange:     metadata.ElevationRange,
 		GzippedHeightBytes: len(gzippedHeights),

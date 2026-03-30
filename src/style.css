@@ -76,9 +76,40 @@ body {
 	position: absolute;
 	inset: 0;
 	pointer-events: none;
+	overflow: hidden;
 	background:
 		linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 28%),
 		radial-gradient(circle at center, transparent 58%, rgba(0, 0, 0, 0.18) 100%);
+}
+
+.named-place-label {
+	position: absolute;
+	left: 0;
+	top: 0;
+	padding: 0.18rem 0.45rem;
+	border-radius: 999px;
+	border: 1px solid rgba(255, 255, 255, 0.16);
+	background: rgba(11, 18, 14, 0.72);
+	backdrop-filter: blur(10px);
+	color: #f9f4e6;
+	font-size: 0.72rem;
+	line-height: 1;
+	letter-spacing: 0.02em;
+	white-space: nowrap;
+	transform: translate(-50%, -50%);
+	text-shadow: 0 1px 1px rgba(0, 0, 0, 0.45);
+}
+
+.named-place-label-hydrography {
+	box-shadow: 0 0 0 1px rgba(107, 211, 255, 0.18);
+}
+
+.named-place-label-landform {
+	box-shadow: 0 0 0 1px rgba(240, 211, 111, 0.18);
+}
+
+.named-place-label-protectedSite {
+	box-shadow: 0 0 0 1px rgba(127, 224, 139, 0.18);
 }
 
 .viewer-hint {
@@ -319,6 +350,10 @@ input[type="range"] {
 	border-radius: 18px;
 	background: rgba(8, 12, 9, 0.2);
 	border: 1px solid rgba(255, 245, 220, 0.08);
+}
+
+.named-place-legend-item {
+	padding: 0.75rem 0.85rem;
 }
 
 .track-item-header {

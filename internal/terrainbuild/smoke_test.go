@@ -1,8 +1,11 @@
 package terrainbuild
 
 import (
+	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -106,6 +109,16 @@ func TestSmokeSingleInputs(t *testing.T) {
 			t.Fatalf("%s rgba bytes = %d, want %d", presetID, len(rgbaBytes), expectedRGBABytes)
 		}
 	}
+	if metadata.NamedPlaces == nil {
+		t.Fatal("expected namedPlaces metadata")
+	}
+	namedPlacesFeatureCount, err := readNamedPlacesHeaderCount(filepath.Join(outputDir, metadata.NamedPlaces.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if namedPlacesFeatureCount != metadata.NamedPlaces.FeatureCount {
+		t.Fatalf("named place feature count = %d, want %d", namedPlacesFeatureCount, metadata.NamedPlaces.FeatureCount)
+	}
 
 	if summary.MeshWidth != metadata.Width || summary.MeshHeight != metadata.Height {
 		t.Fatalf("summary mismatch: %+v metadata=%dx%d", summary, metadata.Width, metadata.Height)
@@ -162,6 +175,26 @@ func TestPublicDataRepresentsFullDataset(t *testing.T) {
 		if rgbaByteCount != expectedRGBABytes {
 			t.Fatalf("%s rgba bytes = %d, want %d", presetID, rgbaByteCount, expectedRGBABytes)
 		}
+	}
+	if metadata.NamedPlaces == nil {
+		t.Fatal("expected namedPlaces metadata in public/data terrain.json")
+	}
+	if metadata.NamedPlaces.Format != namedPlacesFormat || metadata.NamedPlaces.Compression != "gzip" {
+		t.Fatalf("unexpected namedPlaces metadata: %+v", metadata.NamedPlaces)
+	}
+	expectedCategories := []string{"hydrography", "landform", "protectedSite"}
+	if !equalStrings(mapKeys(metadata.NamedPlaces.Categories), expectedCategories) {
+		t.Fatalf("namedPlaces categories = %v, want %v", mapKeys(metadata.NamedPlaces.Categories), expectedCategories)
+	}
+	if metadata.NamedPlaces.FeatureCount <= 0 {
+		t.Fatalf("expected named place features, got %d", metadata.NamedPlaces.FeatureCount)
+	}
+	namedPlacesFeatureCount, err := readNamedPlacesHeaderCount(filepath.Join(repoRoot, DefaultOutputDir, metadata.NamedPlaces.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if namedPlacesFeatureCount != metadata.NamedPlaces.FeatureCount {
+		t.Fatalf("named places header feature count = %d, want %d", namedPlacesFeatureCount, metadata.NamedPlaces.FeatureCount)
 	}
 }
 
@@ -249,4 +282,34 @@ func equalStrings(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func mapKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func readNamedPlacesHeaderCount(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	defer reader.Close()
+
+	header := make([]byte, 16)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return 0, err
+	}
+	if string(header[:4]) != namedPlacesMagic {
+		return 0, fmt.Errorf("unexpected named places magic %q", string(header[:4]))
+	}
+	return int(binary.LittleEndian.Uint32(header[8:12])), nil
 }

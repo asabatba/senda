@@ -21,7 +21,10 @@ export async function inflateBinaryAsset(
 	label: string,
 ) {
 	if (!isGzipPayload(compressedBytes)) {
-		if (compressedBytes.byteLength === expectedByteLength) {
+		if (
+			expectedByteLength <= 0 ||
+			compressedBytes.byteLength === expectedByteLength
+		) {
 			return toArrayBuffer(compressedBytes);
 		}
 
