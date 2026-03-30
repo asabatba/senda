@@ -11,9 +11,6 @@ importers:
       fflate:
         specifier: ^0.8.2
         version: 0.8.2
-      geotiff:
-        specifier: ^3.0.5
-        version: 3.0.5
       three:
         specifier: ^0.183.2
         version: 0.183.2
@@ -357,10 +354,6 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
-
-  geotiff@3.0.5:
-    resolution: {integrity: sha512-OWcL9S9+yDZ6iAlXMt32T1iwUApJM8UiD47xbm6ZP1h33d10fqkPs14EG/ttT5EnefpZSx3G15iDFC5FxUNUwA==}
-    engines: {node: '>=10.19'}
 
   lerc@3.0.0:
     resolution: {integrity: sha512-Rm4J/WaHhRa93nCN2mwWDZFoRVF18G1f47C+kvQWyHGEZxFpTUi73p7lMVSAndyxGt6lJ2/CFbOcf9ra5p8aww==}
@@ -776,15 +769,6 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
-  geotiff@3.0.5:
-    dependencies:
-      '@petamoriken/float16': 3.9.3
-      lerc: 3.0.0
-      pako: 2.1.0
-      parse-headers: 2.0.6
-      quick-lru: 6.1.2
-      web-worker: 1.5.0
-      xml-utils: 1.10.2
       zstddec: 0.2.0
 
   lerc@3.0.0: {}
