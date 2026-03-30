@@ -32,6 +32,7 @@ import type {
 } from "./terrain/types";
 
 const ORTHOPHOTO_PRESET_STORAGE_KEY = "terrain.orthophotoPreset";
+const NAMED_PLACES_VISIBLE_STORAGE_KEY = "terrain.namedPlacesVisible";
 const ORTHOPHOTO_PRESET_ORDER: OrthophotoPresetId[] = ["2k", "4k", "8k"];
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -68,6 +69,11 @@ app.innerHTML = `
           <span>Vertical exaggeration</span>
           <input type="range" min="0.8" max="2" step="0.1" data-exaggeration />
           <strong data-exaggeration-value></strong>
+        </label>
+
+        <label class="control control-toggle" data-named-place-toggle hidden>
+          <span>Feature overlay</span>
+          <input type="checkbox" data-named-place-visible />
         </label>
 
         <div class="upload-block">
@@ -137,6 +143,12 @@ const exaggerationInput = app.querySelector<HTMLInputElement>(
 const exaggerationValue = app.querySelector<HTMLElement>(
 	"[data-exaggeration-value]",
 );
+const namedPlaceToggleNode = app.querySelector<HTMLElement>(
+	"[data-named-place-toggle]",
+);
+const namedPlaceVisibleInput = app.querySelector<HTMLInputElement>(
+	"[data-named-place-visible]",
+);
 const resetButton = app.querySelector<HTMLButtonElement>("[data-reset-camera]");
 const gpxInput = app.querySelector<HTMLInputElement>("[data-gpx-input]");
 const trackFeedbackNode = app.querySelector<HTMLElement>(
@@ -171,6 +183,8 @@ if (
 	!orthophotoPresetSelect ||
 	!exaggerationInput ||
 	!exaggerationValue ||
+	!namedPlaceToggleNode ||
+	!namedPlaceVisibleInput ||
 	!resetButton ||
 	!gpxInput ||
 	!trackFeedbackNode ||
@@ -314,6 +328,35 @@ function getStoredPreset(metadata: TerrainMetadata) {
 function persistPresetSelection(presetId: OrthophotoPresetId) {
 	try {
 		window.localStorage.setItem(ORTHOPHOTO_PRESET_STORAGE_KEY, presetId);
+	} catch {
+		// Ignore storage failures in restricted browsers.
+	}
+}
+
+function getStoredNamedPlacesVisible() {
+	try {
+		const stored = window.localStorage.getItem(
+			NAMED_PLACES_VISIBLE_STORAGE_KEY,
+		);
+		if (stored === "true") {
+			return true;
+		}
+		if (stored === "false") {
+			return false;
+		}
+	} catch {
+		// Ignore storage failures in restricted browsers.
+	}
+
+	return true;
+}
+
+function persistNamedPlacesVisible(value: boolean) {
+	try {
+		window.localStorage.setItem(
+			NAMED_PLACES_VISIBLE_STORAGE_KEY,
+			String(value),
+		);
 	} catch {
 		// Ignore storage failures in restricted browsers.
 	}
@@ -547,6 +590,44 @@ function renderNamedPlaceLegend(metadata: TerrainMetadata) {
 		}),
 	);
 	namedPlaceLegendNode.hidden = categories.length === 0;
+}
+
+function hideNamedPlaceLabels() {
+	if (!terrainRuntime?.namedPlaceOverlay) {
+		return;
+	}
+
+	for (const label of terrainRuntime.namedPlaceOverlay.labelElements) {
+		label.hidden = true;
+	}
+}
+
+function setNamedPlacesVisible(visible: boolean, persist = true) {
+	if (!terrainRuntime?.namedPlaceOverlay) {
+		namedPlaceVisibleInput.checked = visible;
+		namedPlaceToggleNode.hidden = true;
+		namedPlaceLegendNode.hidden = true;
+		return;
+	}
+
+	terrainRuntime.namedPlacesVisible = visible;
+	terrainRuntime.namedPlaceOverlay.group.visible = visible;
+	namedPlaceVisibleInput.checked = visible;
+	namedPlaceToggleNode.hidden = false;
+	namedPlaceLegendNode.hidden = !visible;
+	if (!visible) {
+		hideNamedPlaceLabels();
+	} else {
+		updateNamedPlaceOverlay(
+			terrainRuntime.namedPlaceOverlay,
+			terrainRuntime.currentExaggeration,
+			camera,
+			canvas,
+		);
+	}
+	if (persist) {
+		persistNamedPlacesVisible(visible);
+	}
 }
 
 function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
@@ -931,6 +1012,9 @@ async function loadTerrain() {
 		currentExaggeration: metadata.defaultVerticalExaggeration,
 		currentOrthophotoPreset: selectedPreset,
 		namedPlaceOverlay,
+		namedPlacesVisible: namedPlaceOverlay
+			? getStoredNamedPlacesVisible()
+			: false,
 	};
 
 	exaggerationInput.value = metadata.defaultVerticalExaggeration.toFixed(1);
@@ -940,14 +1024,7 @@ async function loadTerrain() {
 	persistPresetSelection(selectedPreset);
 	resetCamera(metadata, metadata.defaultVerticalExaggeration);
 	resizeRenderer();
-	if (namedPlaceOverlay) {
-		updateNamedPlaceOverlay(
-			namedPlaceOverlay,
-			metadata.defaultVerticalExaggeration,
-			camera,
-			canvas,
-		);
-	}
+	setNamedPlacesVisible(terrainRuntime.namedPlacesVisible, false);
 
 	controlsNode.hidden = false;
 	statsNode.hidden = false;
@@ -963,7 +1040,7 @@ function animate() {
 	animationHandle = window.requestAnimationFrame(animate);
 	updateKeyboardNavigation(deltaSeconds);
 	controls.update();
-	if (terrainRuntime?.namedPlaceOverlay) {
+	if (terrainRuntime?.namedPlaceOverlay && terrainRuntime.namedPlacesVisible) {
 		updateNamedPlaceOverlay(
 			terrainRuntime.namedPlaceOverlay,
 			terrainRuntime.currentExaggeration,
@@ -1001,7 +1078,7 @@ exaggerationInput.addEventListener("input", () => {
 		exaggeration,
 	);
 	syncTrackOverlayGeometries(exaggeration);
-	if (terrainRuntime.namedPlaceOverlay) {
+	if (terrainRuntime.namedPlaceOverlay && terrainRuntime.namedPlacesVisible) {
 		updateNamedPlaceOverlay(
 			terrainRuntime.namedPlaceOverlay,
 			exaggeration,
@@ -1014,6 +1091,10 @@ exaggerationInput.addEventListener("input", () => {
 
 gpxInput.addEventListener("change", async () => {
 	await handleTrackUpload(gpxInput.files);
+});
+
+namedPlaceVisibleInput.addEventListener("change", () => {
+	setNamedPlacesVisible(namedPlaceVisibleInput.checked);
 });
 
 trackListNode.addEventListener("click", (event) => {

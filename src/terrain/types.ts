@@ -107,6 +107,7 @@ export type TerrainRuntime = {
 	currentExaggeration: number;
 	currentOrthophotoPreset: OrthophotoPresetId;
 	namedPlaceOverlay: NamedPlaceOverlay | null;
+	namedPlacesVisible: boolean;
 };
 
 export type TrackPoint = {
