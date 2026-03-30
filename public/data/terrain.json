@@ -38,6 +38,8 @@
     "format": "rgba8",
     "compression": "gzip",
     "sourceFile": "PNOA_MA_OF_ETRS89_HU31_h25_0178_2.tif",
+    "width": 4096,
+    "height": 3983,
     "coverageBounds": {
       "west": 252050,
       "south": 4719330,

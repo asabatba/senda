@@ -43,6 +43,8 @@ type TerrainMetadata = {
 		format: "rgba8";
 		compression: "gzip" | "none";
 		sourceFile: string;
+		width: number;
+		height: number;
 		coverageBounds: TerrainBounds;
 	} | null;
 	defaultVerticalExaggeration: number;
@@ -408,6 +410,32 @@ function sampleHeight(
 	return heights[clampedY * width + clampedX] ?? 0;
 }
 
+function sampleHeightBilinear(
+	heights: Float32Array,
+	width: number,
+	height: number,
+	x: number,
+	y: number,
+) {
+	const maxX = width - 1;
+	const maxY = height - 1;
+	const clampedX = THREE.MathUtils.clamp(x, 0, maxX);
+	const clampedY = THREE.MathUtils.clamp(y, 0, maxY);
+	const x0 = Math.floor(clampedX);
+	const x1 = Math.min(maxX, Math.ceil(clampedX));
+	const y0 = Math.floor(clampedY);
+	const y1 = Math.min(maxY, Math.ceil(clampedY));
+	const tx = clampedX - x0;
+	const ty = clampedY - y0;
+	const top =
+		sampleHeight(heights, width, height, x0, y0) * (1 - tx) +
+		sampleHeight(heights, width, height, x1, y0) * tx;
+	const bottom =
+		sampleHeight(heights, width, height, x0, y1) * (1 - tx) +
+		sampleHeight(heights, width, height, x1, y1) * tx;
+	return top * (1 - ty) + bottom * ty;
+}
+
 function getRasterHeightSample(runtime: TerrainRuntime, x: number, y: number) {
 	const index = y * runtime.metadata.width + x;
 	if (runtime.heightCodes[index] === runtime.metadata.heightAsset.noDataCode) {
@@ -483,8 +511,13 @@ function rampColor(normalizedHeight: number) {
 	return stops.at(-1)?.color ?? [247, 245, 240];
 }
 
-function createReliefCanvas(heights: Float32Array, metadata: TerrainMetadata) {
-	const pixelCount = metadata.width * metadata.height;
+function createReliefCanvas(
+	heights: Float32Array,
+	metadata: TerrainMetadata,
+	textureWidth = metadata.width,
+	textureHeight = metadata.height,
+) {
+	const pixelCount = textureWidth * textureHeight;
 	const pixels = new Uint8Array(pixelCount * 3);
 	const span = Math.max(
 		metadata.elevationRange.max - metadata.elevationRange.min,
@@ -492,37 +525,50 @@ function createReliefCanvas(heights: Float32Array, metadata: TerrainMetadata) {
 	);
 	const lightDirection = new THREE.Vector3(-0.35, 0.8, 0.48).normalize();
 
-	for (let y = 0; y < metadata.height; y += 1) {
-		for (let x = 0; x < metadata.width; x += 1) {
-			const index = y * metadata.width + x;
-			const heightValue = heights[index];
-			const left = sampleHeight(
+	const xScale =
+		textureWidth > 1 ? (metadata.width - 1) / (textureWidth - 1) : 0;
+	const yScale =
+		textureHeight > 1 ? (metadata.height - 1) / (textureHeight - 1) : 0;
+
+	for (let y = 0; y < textureHeight; y += 1) {
+		const sourceY = y * yScale;
+		for (let x = 0; x < textureWidth; x += 1) {
+			const sourceX = x * xScale;
+			const index = y * textureWidth + x;
+			const heightValue = sampleHeightBilinear(
 				heights,
 				metadata.width,
 				metadata.height,
-				x - 1,
-				y,
+				sourceX,
+				sourceY,
 			);
-			const right = sampleHeight(
+			const left = sampleHeightBilinear(
 				heights,
 				metadata.width,
 				metadata.height,
-				x + 1,
-				y,
+				sourceX - xScale,
+				sourceY,
 			);
-			const up = sampleHeight(
+			const right = sampleHeightBilinear(
 				heights,
 				metadata.width,
 				metadata.height,
-				x,
-				y - 1,
+				sourceX + xScale,
+				sourceY,
 			);
-			const down = sampleHeight(
+			const up = sampleHeightBilinear(
 				heights,
 				metadata.width,
 				metadata.height,
-				x,
-				y + 1,
+				sourceX,
+				sourceY - yScale,
+			);
+			const down = sampleHeightBilinear(
+				heights,
+				metadata.width,
+				metadata.height,
+				sourceX,
+				sourceY + yScale,
 			);
 
 			const dx = right - left;
@@ -544,14 +590,14 @@ function createReliefCanvas(heights: Float32Array, metadata: TerrainMetadata) {
 	}
 
 	const canvasElement = document.createElement("canvas");
-	canvasElement.width = metadata.width;
-	canvasElement.height = metadata.height;
+	canvasElement.width = textureWidth;
+	canvasElement.height = textureHeight;
 	const context = canvasElement.getContext("2d");
 	if (!context) {
 		throw new Error("Failed to create a 2D canvas for the relief texture.");
 	}
 
-	const imageData = context.createImageData(metadata.width, metadata.height);
+	const imageData = context.createImageData(textureWidth, textureHeight);
 	for (let index = 0; index < pixelCount; index += 1) {
 		imageData.data[index * 4] = pixels[index * 3];
 		imageData.data[index * 4 + 1] = pixels[index * 3 + 1];
@@ -585,7 +631,8 @@ function createCanvasFromRgbaPixels(
 
 function compositeOrthophoto(
 	reliefCanvas: HTMLCanvasElement,
-	metadata: TerrainMetadata,
+	width: number,
+	height: number,
 	orthophotoPixels: Uint8Array,
 ) {
 	const context = reliefCanvas.getContext("2d");
@@ -595,8 +642,8 @@ function compositeOrthophoto(
 
 	const overlayCanvas = createCanvasFromRgbaPixels(
 		orthophotoPixels,
-		metadata.width,
-		metadata.height,
+		width,
+		height,
 		"orthophoto texture",
 	);
 	context.drawImage(overlayCanvas, 0, 0);
@@ -620,9 +667,21 @@ async function buildSurfaceTexture(
 	heights: Float32Array,
 	orthophotoPixels: Uint8Array | null,
 ) {
-	const reliefCanvas = createReliefCanvas(heights, metadata);
+	const textureWidth = metadata.orthophotoAsset?.width ?? metadata.width;
+	const textureHeight = metadata.orthophotoAsset?.height ?? metadata.height;
+	const reliefCanvas = createReliefCanvas(
+		heights,
+		metadata,
+		textureWidth,
+		textureHeight,
+	);
 	if (orthophotoPixels) {
-		compositeOrthophoto(reliefCanvas, metadata, orthophotoPixels);
+		compositeOrthophoto(
+			reliefCanvas,
+			textureWidth,
+			textureHeight,
+			orthophotoPixels,
+		);
 	}
 
 	const texture = new THREE.CanvasTexture(reliefCanvas);
@@ -1277,7 +1336,8 @@ async function loadTerrain() {
 		}
 
 		const compressedOrthophotoBuffer = await orthophotoResponse.arrayBuffer();
-		const expectedOrthophotoByteLength = metadata.width * metadata.height * 4;
+		const expectedOrthophotoByteLength =
+			metadata.orthophotoAsset.width * metadata.orthophotoAsset.height * 4;
 		const rawOrthophotoBuffer =
 			metadata.orthophotoAsset.compression === "gzip"
 				? await inflateBinaryAsset(
@@ -1345,10 +1405,9 @@ async function loadTerrain() {
 	controlsNode.hidden = false;
 	statsNode.hidden = false;
 	renderTrackList();
-	statusNode.textContent =
-		metadata.orthophotoAsset
-			? "Terrain ready. Orthophoto imagery is draped where available; upload a GPX file to overlay a track."
-			: "Terrain ready. Upload a GPX file to overlay a track.";
+	statusNode.textContent = metadata.orthophotoAsset
+		? "Terrain ready. Orthophoto imagery is draped where available; upload a GPX file to overlay a track."
+		: "Terrain ready. Upload a GPX file to overlay a track.";
 }
 
 function animate() {
