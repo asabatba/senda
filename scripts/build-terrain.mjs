@@ -5,14 +5,15 @@ import { gzipSync } from "node:zlib";
 
 import {
 	DEFAULT_MAX_EDGE,
-	DEFAULT_TEXTURE_MAX_EDGE,
+	DEFAULT_ORTHOPHOTO_PRESET,
 	DEFAULT_VERTICAL_EXAGGERATION,
 	EXPECTED_RESOLUTION,
+	getOrthophotoOutputFile,
+	ORTHOPHOTO_PRESETS,
 	OUTPUT_DIR,
 	OUTPUT_HEIGHTS,
 	OUTPUT_HEIGHTS_RAW,
 	OUTPUT_METADATA,
-	OUTPUT_ORTHO,
 } from "./terrain/config.mjs";
 import { buildDemRaster, encodeHeights } from "./terrain/dem.mjs";
 import { discoverOrthophoto, discoverTiles } from "./terrain/discovery.mjs";
@@ -22,6 +23,7 @@ import { buildOrthophotoAsset } from "./terrain/orthophoto.mjs";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
+const LEGACY_ORTHOPHOTO_FILE = "terrain-ortho.rgba.bin.gz";
 
 function parsePositiveInt(value, envName, fallback) {
 	const parsed = Number.parseInt(value ?? String(fallback), 10);
@@ -38,11 +40,6 @@ async function main() {
 		"TERRAIN_MAX_EDGE",
 		DEFAULT_MAX_EDGE,
 	);
-	const textureMaxEdge = parsePositiveInt(
-		process.env.TERRAIN_TEXTURE_MAX_EDGE,
-		"TERRAIN_TEXTURE_MAX_EDGE",
-		DEFAULT_TEXTURE_MAX_EDGE,
-	);
 
 	const outputDir = path.resolve(repoRoot, OUTPUT_DIR);
 	const { tiles, mergedBounds, noDataValue } = await discoverTiles(repoRoot);
@@ -54,11 +51,6 @@ async function main() {
 		(mergedBounds.north - mergedBounds.south) / EXPECTED_RESOLUTION,
 	);
 	const meshTargetSize = computeTargetSize(sourceWidth, sourceHeight, maxEdge);
-	const textureTargetSize = computeTargetSize(
-		sourceWidth,
-		sourceHeight,
-		textureMaxEdge,
-	);
 
 	const { mergedRaster, validMask } = await buildDemRaster(
 		tiles,
@@ -70,11 +62,29 @@ async function main() {
 		mergedRaster,
 		validMask,
 	);
-	const orthophotoAsset = await buildOrthophotoAsset(
-		orthophoto,
-		mergedBounds,
-		textureTargetSize,
-		OUTPUT_ORTHO,
+
+	const orthophotoAssets = await Promise.all(
+		ORTHOPHOTO_PRESETS.map(async (preset) => {
+			const targetSize = computeTargetSize(
+				sourceWidth,
+				sourceHeight,
+				preset.maxEdge,
+			);
+			const asset = await buildOrthophotoAsset(
+				orthophoto,
+				mergedBounds,
+				targetSize,
+				getOrthophotoOutputFile(preset.id),
+			);
+			if (!asset) {
+				throw new Error(`Failed to build orthophoto preset "${preset.id}".`);
+			}
+
+			return {
+				id: preset.id,
+				asset,
+			};
+		}),
 	);
 
 	const heightBuffer = Buffer.from(
@@ -83,6 +93,10 @@ async function main() {
 		encodedHeights.byteLength,
 	);
 	const gzippedHeights = gzipSync(heightBuffer, { level: 9 });
+
+	const orthophotoPresets = Object.fromEntries(
+		orthophotoAssets.map(({ id, asset }) => [id, asset.metadata]),
+	);
 
 	const metadata = {
 		sourceFiles: tiles.map((tile) => tile.name),
@@ -105,7 +119,10 @@ async function main() {
 			compression: "gzip",
 			noDataCode: 0,
 		},
-		orthophotoAsset: orthophotoAsset?.metadata ?? null,
+		orthophoto: {
+			defaultPreset: DEFAULT_ORTHOPHOTO_PRESET,
+			presets: orthophotoPresets,
+		},
 		defaultVerticalExaggeration: DEFAULT_VERTICAL_EXAGGERATION,
 		overlay: {
 			url: null,
@@ -114,6 +131,7 @@ async function main() {
 
 	await fs.mkdir(outputDir, { recursive: true });
 	await fs.rm(path.join(outputDir, OUTPUT_HEIGHTS_RAW), { force: true });
+	await fs.rm(path.join(outputDir, LEGACY_ORTHOPHOTO_FILE), { force: true });
 	await fs.writeFile(path.join(outputDir, OUTPUT_HEIGHTS), gzippedHeights);
 	await fs.writeFile(
 		path.join(outputDir, OUTPUT_METADATA),
@@ -121,14 +139,11 @@ async function main() {
 		"utf8",
 	);
 
-	if (orthophotoAsset) {
-		await fs.writeFile(
-			path.join(outputDir, OUTPUT_ORTHO),
-			orthophotoAsset.bytes,
-		);
-	} else {
-		await fs.rm(path.join(outputDir, OUTPUT_ORTHO), { force: true });
-	}
+	await Promise.all(
+		orthophotoAssets.map(({ asset }) =>
+			fs.writeFile(path.join(outputDir, asset.metadata.url), asset.bytes),
+		),
+	);
 
 	console.log(
 		JSON.stringify(
@@ -136,14 +151,20 @@ async function main() {
 				sources: metadata.sourceFiles,
 				meshWidth: metadata.width,
 				meshHeight: metadata.height,
-				orthophotoWidth: orthophotoAsset?.metadata.width ?? 0,
-				orthophotoHeight: orthophotoAsset?.metadata.height ?? 0,
+				orthophotoPresets: Object.fromEntries(
+					orthophotoAssets.map(({ id, asset }) => [
+						id,
+						{
+							width: asset.metadata.width,
+							height: asset.metadata.height,
+							gzippedBytes: asset.bytes.length,
+							coverageBounds: asset.metadata.coverageBounds,
+						},
+					]),
+				),
 				sizeMeters: metadata.sizeMeters,
 				elevationRange: metadata.elevationRange,
 				gzippedHeightBytes: gzippedHeights.length,
-				gzippedOrthophotoBytes: orthophotoAsset?.bytes.length ?? 0,
-				orthophotoCoverageBounds:
-					orthophotoAsset?.metadata.coverageBounds ?? null,
 				outputDir: path.relative(repoRoot, outputDir),
 			},
 			null,

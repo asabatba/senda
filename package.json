@@ -1,23 +1,23 @@
 {
-  "name": "gpx3d2-terrain-viewer",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "terrain:build": "node scripts/build-terrain.mjs"
-  },
-  "dependencies": {
-    "fflate": "^0.8.2",
-    "geotiff": "^3.0.5",
-    "three": "^0.183.2"
-  },
-  "devDependencies": {
-    "@types/node": "^25.5.0",
-    "@types/three": "^0.183.1",
-    "typescript": "^6.0.2",
-    "vite": "^8.0.3"
-  }
+	"name": "gpx3d2-terrain-viewer",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview",
+		"terrain:build": "node scripts/build-terrain.mjs"
+	},
+	"dependencies": {
+		"fflate": "^0.8.2",
+		"geotiff": "^3.0.5",
+		"three": "^0.183.2"
+	},
+	"devDependencies": {
+		"@types/node": "^25.5.0",
+		"@types/three": "^0.183.1",
+		"typescript": "^6.0.2",
+		"vite": "^8.0.3"
+	}
 }

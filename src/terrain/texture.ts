@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 import { sampleHeightBilinear } from "./heights";
-import type { TerrainMetadata } from "./types";
+import type { OrthophotoPresetAsset, TerrainMetadata } from "./types";
 
 function rampColor(normalizedHeight: number) {
 	const stops = [
@@ -170,9 +170,10 @@ export async function buildSurfaceTexture(
 	metadata: TerrainMetadata,
 	heights: Float32Array,
 	orthophotoPixels: Uint8Array | null,
+	orthophotoPreset: OrthophotoPresetAsset | null,
 ) {
-	const textureWidth = metadata.orthophotoAsset?.width ?? metadata.width;
-	const textureHeight = metadata.orthophotoAsset?.height ?? metadata.height;
+	const textureWidth = orthophotoPreset?.width ?? metadata.width;
+	const textureHeight = orthophotoPreset?.height ?? metadata.height;
 	const reliefCanvas = createReliefCanvas(
 		heights,
 		metadata,

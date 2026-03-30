@@ -18,11 +18,15 @@ import {
 	projectTrackSegments,
 } from "./terrain/tracks";
 import type {
+	OrthophotoPresetId,
 	TerrainMetadata,
 	TerrainRuntime,
 	TrackOverlay,
 	TrackSegment,
 } from "./terrain/types";
+
+const ORTHOPHOTO_PRESET_STORAGE_KEY = "terrain.orthophotoPreset";
+const ORTHOPHOTO_PRESET_ORDER: OrthophotoPresetId[] = ["2k", "4k", "8k"];
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
@@ -49,6 +53,11 @@ app.innerHTML = `
       <p class="status" data-status>Loading terrain assets...</p>
 
       <div class="controls" data-controls hidden>
+        <label class="control" data-orthophoto-control>
+          <span>Orthophoto resolution</span>
+          <select class="control-select" data-orthophoto-preset></select>
+        </label>
+
         <label class="control">
           <span>Vertical exaggeration</span>
           <input type="range" min="0.8" max="3.2" step="0.1" data-exaggeration />
@@ -101,6 +110,12 @@ const canvas = app.querySelector<HTMLCanvasElement>("canvas.viewer");
 const statusNode = app.querySelector<HTMLElement>("[data-status]");
 const controlsNode = app.querySelector<HTMLElement>("[data-controls]");
 const statsNode = app.querySelector<HTMLElement>("[data-stats]");
+const orthophotoControlNode = app.querySelector<HTMLElement>(
+	"[data-orthophoto-control]",
+);
+const orthophotoPresetSelect = app.querySelector<HTMLSelectElement>(
+	"[data-orthophoto-preset]",
+);
 const exaggerationInput = app.querySelector<HTMLInputElement>(
 	"[data-exaggeration]",
 );
@@ -127,6 +142,8 @@ if (
 	!statusNode ||
 	!controlsNode ||
 	!statsNode ||
+	!orthophotoControlNode ||
+	!orthophotoPresetSelect ||
 	!exaggerationInput ||
 	!exaggerationValue ||
 	!resetButton ||
@@ -181,6 +198,16 @@ const keyboardOffset = new THREE.Vector3();
 let terrainRuntime: TerrainRuntime | null = null;
 let animationHandle = 0;
 let trackColorCursor = 0;
+let orthophotoSwitchInFlight = false;
+
+function setStatus(message: string, isError = false) {
+	statusNode.textContent = message;
+	statusNode.classList.toggle("status-error", isError);
+}
+
+function formatPresetLabel(presetId: OrthophotoPresetId) {
+	return presetId.toUpperCase();
+}
 
 function isEditableTarget(target: EventTarget | null) {
 	if (!(target instanceof HTMLElement)) {
@@ -223,6 +250,86 @@ function getCurrentExaggeration() {
 
 	const parsed = Number.parseFloat(exaggerationInput.value);
 	return Number.isFinite(parsed) ? parsed : terrainRuntime.currentExaggeration;
+}
+
+function isValidPresetId(
+	metadata: TerrainMetadata,
+	value: string,
+): value is OrthophotoPresetId {
+	return value in metadata.orthophoto.presets;
+}
+
+function getStoredPreset(metadata: TerrainMetadata) {
+	try {
+		const stored = window.localStorage.getItem(ORTHOPHOTO_PRESET_STORAGE_KEY);
+		if (stored && isValidPresetId(metadata, stored)) {
+			return stored;
+		}
+	} catch {
+		// Ignore storage failures in restricted browsers.
+	}
+
+	return metadata.orthophoto.defaultPreset;
+}
+
+function persistPresetSelection(presetId: OrthophotoPresetId) {
+	try {
+		window.localStorage.setItem(ORTHOPHOTO_PRESET_STORAGE_KEY, presetId);
+	} catch {
+		// Ignore storage failures in restricted browsers.
+	}
+}
+
+function populateOrthophotoPresetControl(
+	metadata: TerrainMetadata,
+	selectedPreset: OrthophotoPresetId,
+) {
+	orthophotoPresetSelect.replaceChildren(
+		...ORTHOPHOTO_PRESET_ORDER.map((presetId) => {
+			const option = document.createElement("option");
+			option.value = presetId;
+			option.textContent = formatPresetLabel(presetId);
+			option.disabled = !(presetId in metadata.orthophoto.presets);
+			return option;
+		}),
+	);
+	orthophotoPresetSelect.value = selectedPreset;
+	orthophotoControlNode.hidden = false;
+}
+
+async function loadOrthophotoPresetPixels(
+	metadata: TerrainMetadata,
+	presetId: OrthophotoPresetId,
+	baseUrl: string,
+) {
+	const preset = metadata.orthophoto.presets[presetId];
+	setStatus(`Loading ${formatPresetLabel(presetId)} orthophoto imagery...`);
+	const orthophotoAssetUrl = resolveAssetUrl(preset.url, baseUrl);
+	const orthophotoResponse = await fetch(orthophotoAssetUrl);
+	if (!orthophotoResponse.ok) {
+		throw new Error(
+			`Terrain orthophoto asset request failed with ${orthophotoResponse.status}.`,
+		);
+	}
+
+	const compressedOrthophotoBuffer = await orthophotoResponse.arrayBuffer();
+	const expectedOrthophotoByteLength = preset.width * preset.height * 4;
+	const rawOrthophotoBuffer =
+		preset.compression === "gzip"
+			? await inflateBinaryAsset(
+					new Uint8Array(compressedOrthophotoBuffer),
+					expectedOrthophotoByteLength,
+					"Terrain orthophoto asset",
+				)
+			: compressedOrthophotoBuffer;
+
+	if (rawOrthophotoBuffer.byteLength !== expectedOrthophotoByteLength) {
+		throw new Error(
+			`Terrain orthophoto asset has ${rawOrthophotoBuffer.byteLength} bytes, expected ${expectedOrthophotoByteLength}.`,
+		);
+	}
+
+	return new Uint8Array(rawOrthophotoBuffer);
 }
 
 function updateTrackMaterialsResolution() {
@@ -338,6 +445,7 @@ function buildTrackListItem(overlay: TrackOverlay) {
 	const zoomButton = document.createElement("button");
 	zoomButton.type = "button";
 	zoomButton.className = "track-button";
+	toggleButton.dataset.action = "toggle";
 	zoomButton.dataset.action = "zoom";
 	zoomButton.textContent = "Zoom to track";
 
@@ -453,17 +561,79 @@ function resizeRenderer() {
 	updateTrackMaterialsResolution();
 }
 
-function updateStats(metadata: TerrainMetadata) {
+function updateStats(
+	metadata: TerrainMetadata,
+	currentPreset: OrthophotoPresetId,
+) {
 	const demSource =
 		metadata.sourceFiles.length === 1
 			? metadata.sourceFiles[0]
 			: `${metadata.sourceFiles.length} DEM tiles`;
-	sourceNode.textContent = metadata.orthophotoAsset
-		? `${demSource} + ${metadata.orthophotoAsset.sourceFile}`
-		: demSource;
+	sourceNode.textContent = `${demSource} + ${metadata.orthophoto.presets[currentPreset].sourceFile} (${formatPresetLabel(currentPreset)})`;
 	footprintNode.textContent = `${formatDistance(metadata.sizeMeters.width)} x ${formatDistance(metadata.sizeMeters.height)}`;
 	elevationRangeNode.textContent = `${metadata.elevationRange.min.toFixed(0)} m to ${metadata.elevationRange.max.toFixed(0)} m`;
 	boundsNode.textContent = formatBounds(metadata);
+}
+
+async function applyOrthophotoPreset(
+	presetId: OrthophotoPresetId,
+	persistSelection = true,
+) {
+	if (!terrainRuntime || orthophotoSwitchInFlight) {
+		return;
+	}
+
+	if (terrainRuntime.currentOrthophotoPreset === presetId) {
+		if (persistSelection) {
+			persistPresetSelection(presetId);
+		}
+		return;
+	}
+
+	orthophotoSwitchInFlight = true;
+	orthophotoPresetSelect.disabled = true;
+
+	try {
+		const preset = terrainRuntime.metadata.orthophoto.presets[presetId];
+		const orthophotoPixels = await loadOrthophotoPresetPixels(
+			terrainRuntime.metadata,
+			presetId,
+			terrainRuntime.assetsBaseUrl,
+		);
+		const nextTexture = await buildSurfaceTexture(
+			terrainRuntime.metadata,
+			terrainRuntime.heights,
+			orthophotoPixels,
+			preset,
+		);
+
+		const material = terrainRuntime.mesh.material;
+		const previousTexture = material.map;
+		material.map = nextTexture;
+		material.needsUpdate = true;
+		previousTexture?.dispose();
+
+		terrainRuntime.currentOrthophotoPreset = presetId;
+		orthophotoPresetSelect.value = presetId;
+		updateStats(terrainRuntime.metadata, presetId);
+		if (persistSelection) {
+			persistPresetSelection(presetId);
+		}
+		setStatus(
+			`Terrain ready. ${formatPresetLabel(presetId)} orthophoto loaded; upload a GPX file to overlay a track.`,
+		);
+	} catch (error) {
+		orthophotoPresetSelect.value = terrainRuntime.currentOrthophotoPreset;
+		setStatus(
+			error instanceof Error
+				? error.message
+				: "Orthophoto resolution switch failed.",
+			true,
+		);
+	} finally {
+		orthophotoPresetSelect.disabled = false;
+		orthophotoSwitchInFlight = false;
+	}
 }
 
 function createTrackOverlay(name: string, segments: TrackSegment[]) {
@@ -580,7 +750,7 @@ async function loadTerrain() {
 		);
 	}
 
-	statusNode.textContent = "Loading terrain metadata...";
+	setStatus("Loading terrain metadata...");
 	const metadataUrl = resolveAssetUrl("data/terrain.json");
 	const metadataResponse = await fetch(metadataUrl);
 	if (!metadataResponse.ok) {
@@ -589,8 +759,11 @@ async function loadTerrain() {
 		);
 	}
 	const metadata = (await metadataResponse.json()) as TerrainMetadata;
+	const selectedPreset = getStoredPreset(metadata);
+	populateOrthophotoPresetControl(metadata, selectedPreset);
+	orthophotoPresetSelect.disabled = true;
 
-	statusNode.textContent = "Loading terrain heightmap...";
+	setStatus("Loading terrain heightmap...");
 	const heightAssetUrl = resolveAssetUrl(
 		metadata.heightAsset.url,
 		metadataResponse.url,
@@ -619,48 +792,20 @@ async function loadTerrain() {
 		);
 	}
 
-	let orthophotoPixels: Uint8Array | null = null;
-	if (metadata.orthophotoAsset) {
-		statusNode.textContent = "Loading orthophoto imagery...";
-		const orthophotoAssetUrl = resolveAssetUrl(
-			metadata.orthophotoAsset.url,
-			metadataResponse.url,
-		);
-		const orthophotoResponse = await fetch(orthophotoAssetUrl);
-		if (!orthophotoResponse.ok) {
-			throw new Error(
-				`Terrain orthophoto asset request failed with ${orthophotoResponse.status}.`,
-			);
-		}
+	const orthophotoPixels = await loadOrthophotoPresetPixels(
+		metadata,
+		selectedPreset,
+		metadataResponse.url,
+	);
 
-		const compressedOrthophotoBuffer = await orthophotoResponse.arrayBuffer();
-		const expectedOrthophotoByteLength =
-			metadata.orthophotoAsset.width * metadata.orthophotoAsset.height * 4;
-		const rawOrthophotoBuffer =
-			metadata.orthophotoAsset.compression === "gzip"
-				? await inflateBinaryAsset(
-						new Uint8Array(compressedOrthophotoBuffer),
-						expectedOrthophotoByteLength,
-						"Terrain orthophoto asset",
-					)
-				: compressedOrthophotoBuffer;
-
-		if (rawOrthophotoBuffer.byteLength !== expectedOrthophotoByteLength) {
-			throw new Error(
-				`Terrain orthophoto asset has ${rawOrthophotoBuffer.byteLength} bytes, expected ${expectedOrthophotoByteLength}.`,
-			);
-		}
-
-		orthophotoPixels = new Uint8Array(rawOrthophotoBuffer);
-	}
-
-	statusNode.textContent = "Preparing 3D terrain...";
+	setStatus("Preparing 3D terrain...");
 	const heightCodes = new Uint16Array(rawHeightBuffer);
 	const heights = buildHeightArray(heightCodes, metadata);
 	const surfaceTexture = await buildSurfaceTexture(
 		metadata,
 		heights,
 		orthophotoPixels,
+		metadata.orthophoto.presets[selectedPreset],
 	);
 	const geometry = new THREE.PlaneGeometry(
 		metadata.sizeMeters.width,
@@ -691,21 +836,25 @@ async function loadTerrain() {
 		heights,
 		heightCodes,
 		metadata,
+		assetsBaseUrl: metadataResponse.url,
 		currentExaggeration: metadata.defaultVerticalExaggeration,
+		currentOrthophotoPreset: selectedPreset,
 	};
 
 	exaggerationInput.value = metadata.defaultVerticalExaggeration.toFixed(1);
 	exaggerationValue.textContent = `${metadata.defaultVerticalExaggeration.toFixed(1)}x`;
-	updateStats(metadata);
+	updateStats(metadata, selectedPreset);
+	persistPresetSelection(selectedPreset);
 	resetCamera(metadata, metadata.defaultVerticalExaggeration);
 	resizeRenderer();
 
 	controlsNode.hidden = false;
 	statsNode.hidden = false;
+	orthophotoPresetSelect.disabled = false;
 	renderTrackList();
-	statusNode.textContent = metadata.orthophotoAsset
-		? "Terrain ready. Orthophoto imagery is draped where available; upload a GPX file to overlay a track."
-		: "Terrain ready. Upload a GPX file to overlay a track.";
+	setStatus(
+		`Terrain ready. ${formatPresetLabel(selectedPreset)} orthophoto loaded; upload a GPX file to overlay a track.`,
+	);
 }
 
 function animate() {
@@ -715,6 +864,20 @@ function animate() {
 	controls.update();
 	renderer.render(scene, camera);
 }
+
+orthophotoPresetSelect.addEventListener("change", async () => {
+	if (!terrainRuntime) {
+		return;
+	}
+
+	const nextPreset = orthophotoPresetSelect.value;
+	if (!isValidPresetId(terrainRuntime.metadata, nextPreset)) {
+		orthophotoPresetSelect.value = terrainRuntime.currentOrthophotoPreset;
+		return;
+	}
+
+	await applyOrthophotoPreset(nextPreset);
+});
 
 exaggerationInput.addEventListener("input", () => {
 	if (!terrainRuntime) {
@@ -815,9 +978,10 @@ window.addEventListener("blur", () => {
 });
 
 loadTerrain().catch((error) => {
-	statusNode.textContent =
-		error instanceof Error ? error.message : "Terrain loading failed.";
-	statusNode.classList.add("status-error");
+	setStatus(
+		error instanceof Error ? error.message : "Terrain loading failed.",
+		true,
+	);
 });
 
 resizeRenderer();
@@ -830,4 +994,6 @@ window.addEventListener("beforeunload", () => {
 	for (const overlay of trackOverlays) {
 		disposeTrackOverlay(overlay);
 	}
+	const material = terrainRuntime?.mesh.material;
+	material?.map?.dispose();
 });

@@ -14,6 +14,18 @@ export type TerrainBounds = {
 	north: number;
 };
 
+export type OrthophotoPresetId = "2k" | "4k" | "8k";
+
+export type OrthophotoPresetAsset = {
+	url: string;
+	format: "rgba8";
+	compression: "gzip" | "none";
+	sourceFile: string;
+	width: number;
+	height: number;
+	coverageBounds: TerrainBounds;
+};
+
 export type TerrainMetadata = {
 	sourceFiles: string[];
 	width: number;
@@ -38,15 +50,10 @@ export type TerrainMetadata = {
 		compression: "gzip" | "none";
 		noDataCode: 0;
 	};
-	orthophotoAsset: {
-		url: string;
-		format: "rgba8";
-		compression: "gzip" | "none";
-		sourceFile: string;
-		width: number;
-		height: number;
-		coverageBounds: TerrainBounds;
-	} | null;
+	orthophoto: {
+		defaultPreset: OrthophotoPresetId;
+		presets: Record<OrthophotoPresetId, OrthophotoPresetAsset>;
+	};
 	defaultVerticalExaggeration: number;
 	overlay: {
 		url: string | null;
@@ -59,7 +66,9 @@ export type TerrainRuntime = {
 	heights: Float32Array;
 	heightCodes: Uint16Array;
 	metadata: TerrainMetadata;
+	assetsBaseUrl: string;
 	currentExaggeration: number;
+	currentOrthophotoPreset: OrthophotoPresetId;
 };
 
 export type TrackPoint = {

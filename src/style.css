@@ -207,6 +207,22 @@ h1 {
 	color: #fff4dc;
 }
 
+.control-select {
+	width: 100%;
+	appearance: none;
+	border: 1px solid rgba(255, 245, 220, 0.14);
+	border-radius: 14px;
+	padding: 0.8rem 0.95rem;
+	background: rgba(255, 245, 220, 0.06);
+	color: #f5eddc;
+	font: inherit;
+}
+
+.control-select:disabled {
+	opacity: 0.6;
+	cursor: progress;
+}
+
 input[type="range"] {
 	width: 100%;
 	accent-color: #e7b566;
