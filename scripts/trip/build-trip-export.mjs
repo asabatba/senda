@@ -47,12 +47,16 @@ function main() {
 		repoRoot,
 		options.csv,
 	);
+	const timeOptions = {
+		hourCorrection: options.imageTimeHourCorrection,
+		timezone: options.timezone,
+	};
 	const placedImages = placeImages(
 		images,
 		csvEntries,
 		tracks.lookup,
 		terrain,
-		options.imageTimeHourCorrection,
+		timeOptions,
 	);
 	const clustered = clusterAnchors(
 		placedImages,
@@ -85,6 +89,7 @@ function main() {
 		copiedImages,
 		terrainSubset.metadata.orthophoto.defaultPreset,
 		options.cardHeight,
+		options.timezone,
 	);
 
 	buildViewer(tempBuildDir, repoRoot);
@@ -104,6 +109,7 @@ function main() {
 		clusterCount: rebasedClusters.clusters.length,
 		unplacedImages: placedImages.unplaced.length,
 		imageTimeHourCorrection: options.imageTimeHourCorrection,
+		timezone: options.timezone,
 		trackPaddingMeters: options.trackPaddingMeters,
 		terrainSizeMeters: terrainSubset.metadata.sizeMeters,
 		outDir: relative(repoRoot, outDir) || ".",
@@ -127,6 +133,7 @@ function parseArgs(args) {
 		clusterDistance: DEFAULT_CLUSTER_DISTANCE,
 		cardHeight: DEFAULT_CARD_HEIGHT,
 		imageTimeHourCorrection: 0,
+		timezone: null,
 		trackPaddingMeters: DEFAULT_TRACK_PADDING_METERS,
 	};
 
@@ -168,6 +175,11 @@ function parseArgs(args) {
 			index += 1;
 			continue;
 		}
+		if (token === "--timezone") {
+			options.timezone = assertValue(token, value);
+			index += 1;
+			continue;
+		}
 		if (token === "--track-padding-meters") {
 			options.trackPaddingMeters = parsePositiveNumber(token, value);
 			index += 1;
@@ -177,8 +189,8 @@ function parseArgs(args) {
 			process.stdout.write(
 				[
 					"Usage: pnpm trip:build --gpx file.gpx [--gpx file2.gpx] [--images path|glob] [--csv manifest.csv]",
-					"\t[--out-dir .trip-export] [--cluster-distance 60] [--card-height 280] [--image-time-hour-correction 0]",
-					"\t[--track-padding-meters 1000]",
+					"\t[--out-dir .trip-export] [--cluster-distance 60] [--card-height 280] [--track-padding-meters 1000]",
+					"\t[--timezone Europe/Madrid] [--image-time-hour-correction 0]  (can be combined: timezone interprets naive EXIF/CSV times, hour-correction then shifts by N hours)",
 				].join("\n") + "\n",
 			);
 			process.exit(0);
@@ -215,6 +227,15 @@ function parseNumber(flag, value) {
 function validateInputs(options) {
 	if (options.gpx.length === 0) {
 		throw new Error("At least one --gpx file is required.");
+	}
+	if (options.timezone) {
+		try {
+			Intl.DateTimeFormat(undefined, { timeZone: options.timezone });
+		} catch {
+			throw new Error(
+				`--timezone "${options.timezone}" is not a valid IANA time zone identifier.`,
+			);
+		}
 	}
 }
 
@@ -737,13 +758,7 @@ function parseCsv(text) {
 	});
 }
 
-function placeImages(
-	images,
-	csvEntries,
-	lookup,
-	terrain,
-	imageTimeHourCorrection,
-) {
+function placeImages(images, csvEntries, lookup, terrain, timeOptions) {
 	const manifestMap = new Map();
 	for (const entry of csvEntries) {
 		if (!entry.image) {
@@ -764,7 +779,7 @@ function placeImages(
 			manifest,
 			lookup,
 			terrain,
-			imageTimeHourCorrection,
+			timeOptions,
 		);
 		if (!resolved) {
 			unplaced.push({
@@ -804,16 +819,11 @@ function placeImages(
 	return { anchors, unplaced };
 }
 
-function resolveImagePlacement(
-	image,
-	manifest,
-	lookup,
-	terrain,
-	imageTimeHourCorrection,
-) {
-	const correctedExifCaptureTime = applyHourCorrection(
+function resolveImagePlacement(image, manifest, lookup, terrain, timeOptions) {
+	const adjustedExifCaptureTime = adjustTimestamp(
 		image.exif.captureTime,
-		imageTimeHourCorrection,
+		timeOptions,
+		true,
 	);
 
 	if (manifest?.lat && manifest?.lon) {
@@ -828,7 +838,7 @@ function resolveImagePlacement(
 				lat: Number.parseFloat(manifest.lat),
 				lon: Number.parseFloat(manifest.lon),
 				projected,
-				captureTime: normalizeTimestamp(manifest.time, imageTimeHourCorrection),
+				captureTime: adjustTimestamp(manifest.time, timeOptions, false),
 			};
 		}
 	}
@@ -845,15 +855,12 @@ function resolveImagePlacement(
 				lat: image.exif.lat,
 				lon: image.exif.lon,
 				projected,
-				captureTime: correctedExifCaptureTime,
+				captureTime: adjustedExifCaptureTime,
 			};
 		}
 	}
 
-	const csvTime = normalizeTimestamp(
-		manifest?.time ?? null,
-		imageTimeHourCorrection,
-	);
+	const csvTime = adjustTimestamp(manifest?.time ?? null, timeOptions, false);
 	if (csvTime) {
 		const interpolated = lookup.interpolateByTime(Date.parse(csvTime));
 		if (interpolated?.projected) {
@@ -877,14 +884,14 @@ function resolveImagePlacement(
 				lat: interpolated.lat,
 				lon: interpolated.lon,
 				projected: interpolated.projected,
-				captureTime: csvTime ?? correctedExifCaptureTime,
+				captureTime: csvTime ?? adjustedExifCaptureTime,
 			};
 		}
 	}
 
-	if (correctedExifCaptureTime) {
+	if (adjustedExifCaptureTime) {
 		const interpolated = lookup.interpolateByTime(
-			Date.parse(correctedExifCaptureTime),
+			Date.parse(adjustedExifCaptureTime),
 		);
 		if (interpolated?.projected) {
 			return {
@@ -892,7 +899,7 @@ function resolveImagePlacement(
 				lat: interpolated.lat,
 				lon: interpolated.lon,
 				projected: interpolated.projected,
-				captureTime: correctedExifCaptureTime,
+				captureTime: adjustedExifCaptureTime,
 			};
 		}
 	}
@@ -978,6 +985,7 @@ function buildTripBundle(
 	copiedImages,
 	defaultPresetId,
 	cardHeight,
+	timezone,
 ) {
 	return {
 		version: 1,
@@ -988,6 +996,7 @@ function buildTripBundle(
 		},
 		display: {
 			cardHeight,
+			...(timezone ? { timezone } : {}),
 		},
 		stats: {
 			trackCount: tracks.segments.length,
@@ -1540,7 +1549,7 @@ function applyHourCorrection(isoLikeValue, hourCorrection) {
 	return new Date(parsed + hourCorrection * 60 * 60 * 1000).toISOString();
 }
 
-function normalizeExifTimestamp(value, hourCorrection = 0) {
+function normalizeExifTimestamp(value) {
 	if (!value) {
 		return null;
 	}
@@ -1549,17 +1558,86 @@ function normalizeExifTimestamp(value, hourCorrection = 0) {
 	if (Number.isNaN(Date.parse(iso))) {
 		return null;
 	}
-	return applyHourCorrection(iso, hourCorrection);
+	return iso;
 }
 
-function normalizeTimestamp(value, hourCorrection = 0) {
+/**
+ * Converts a local-time ISO string (no timezone marker) to UTC ISO,
+ * treating the input as local time in the given IANA timezone.
+ * DST-aware via one iteration.
+ */
+function interpretLocalAsTimezone(naiveIso, timezone) {
+	const naiveMs = Date.parse(`${naiveIso}Z`);
+	if (Number.isNaN(naiveMs)) {
+		return null;
+	}
+
+	// Use formatToParts to reconstruct the local time as a naive UTC ms value,
+	// avoiding locale-specific toLocaleString formats that vary across platforms.
+	function localAsUtcMs(ms) {
+		const parts = new Intl.DateTimeFormat("en-US", {
+			timeZone: timezone,
+			year: "numeric",
+			month: "2-digit",
+			day: "2-digit",
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit",
+			hour12: false,
+		}).formatToParts(new Date(ms));
+		const get = (type) => parts.find((p) => p.type === type)?.value ?? "00";
+		return Date.parse(
+			`${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}Z`,
+		);
+	}
+
+	// offset = how far ahead local time is from UTC (positive for UTC+ zones)
+	// actual UTC = naiveMs - offset
+	const offset1 = localAsUtcMs(naiveMs) - naiveMs;
+	const utcMs = naiveMs - offset1;
+	// One more pass for DST boundary accuracy
+	const offset2 = localAsUtcMs(utcMs) - utcMs;
+	return new Date(naiveMs - offset2).toISOString();
+}
+
+/**
+ * Adjusts a timestamp string to UTC using either hour correction or timezone
+ * interpretation. When `isExif` is true the input is already a naive-UTC ISO
+ * string (Z-appended local time) that needs the Z stripped before timezone
+ * reinterpretation.
+ */
+function adjustTimestamp(value, timeOptions, isExif) {
 	if (!value) {
 		return null;
 	}
+	const { hourCorrection = 0, timezone = null } = timeOptions;
+	if (timezone) {
+		// Strip trailing Z so we have a plain local-time string to reinterpret
+		const naive = isExif
+			? value.replace(/Z$/, "")
+			: /[Zz]$|[+-]\d{2}:\d{2}$/.test(value.trim())
+				? null // already has timezone info — parse as-is
+				: value.trim();
+		if (naive === null) {
+			// Value already carries timezone info; just normalise to UTC
+			const parsed = Date.parse(value);
+			if (Number.isNaN(parsed)) return null;
+			return applyHourCorrection(
+				new Date(parsed).toISOString(),
+				hourCorrection,
+			);
+		}
+		return applyHourCorrection(
+			interpretLocalAsTimezone(naive, timezone),
+			hourCorrection,
+		);
+	}
+	// Legacy hour-correction path
 	const parsed = Date.parse(value);
-	return Number.isNaN(parsed)
-		? null
-		: applyHourCorrection(new Date(parsed).toISOString(), hourCorrection);
+	if (Number.isNaN(parsed)) {
+		return null;
+	}
+	return applyHourCorrection(new Date(parsed).toISOString(), hourCorrection);
 }
 
 function hasGlob(pathValue) {

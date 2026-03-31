@@ -56,6 +56,7 @@ type TripBundle = {
 	};
 	display: {
 		cardHeight: number;
+		timezone?: string;
 	};
 	stats: {
 		trackCount: number;
@@ -262,7 +263,7 @@ function renderTrackSegments(
 	buildTrackTimelineLabels(segments);
 }
 
-function formatIsoDateTime(value: string | number | null) {
+function formatIsoDateTime(value: string | number | null, timezone?: string) {
 	if (value === null) {
 		return null;
 	}
@@ -270,6 +271,21 @@ function formatIsoDateTime(value: string | number | null) {
 	const parsed = typeof value === "number" ? value : Date.parse(value);
 	if (Number.isNaN(parsed)) {
 		return typeof value === "string" ? value : null;
+	}
+
+	if (timezone) {
+		return new Intl.DateTimeFormat("en-CA", {
+			timeZone: timezone,
+			year: "numeric",
+			month: "2-digit",
+			day: "2-digit",
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit",
+			hour12: false,
+		})
+			.format(parsed)
+			.replace(", ", " ");
 	}
 
 	return new Date(parsed).toISOString().slice(0, 19).replace("T", " ");
@@ -376,7 +392,7 @@ function buildTrackTimelineLabels(segments: TripTrackSegment[]) {
 	clearTrackTimelineLabels();
 
 	for (const anchor of collectTimelineLabelAnchors(segments)) {
-		const text = formatIsoDateTime(anchor.time);
+		const text = formatIsoDateTime(anchor.time, tripBundle?.display.timezone);
 		if (!text) {
 			continue;
 		}
@@ -437,7 +453,10 @@ function drawCardTextBlock(
 	description: string | null,
 	captureTime: string | null,
 ) {
-	const dateLabel = formatIsoDateTime(captureTime);
+	const dateLabel = formatIsoDateTime(
+		captureTime,
+		tripBundle?.display.timezone,
+	);
 	const hasDescription = Boolean(description && description.trim().length > 0);
 	const lines = [
 		hasDescription ? (description?.trim() ?? null) : null,
