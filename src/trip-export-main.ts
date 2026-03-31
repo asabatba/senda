@@ -7,7 +7,7 @@ import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 
 import { inflateBinaryAsset } from "./terrain/assets";
-import { TRACK_SURFACE_OFFSET } from "./terrain/constants";
+import { KEYBOARD_MOVE_CODES, TRACK_SURFACE_OFFSET } from "./terrain/constants";
 import { applyVerticalExaggeration, buildHeightArray } from "./terrain/heights";
 import { buildSurfaceTexture } from "./terrain/texture";
 import type { OrthophotoPresetId, TerrainMetadata } from "./terrain/types";
@@ -95,7 +95,7 @@ app.innerHTML = `
       <div class="trip-viewer-overlay"></div>
       <div class="trip-viewer-hint">
         <strong>Trip Scene</strong>
-        <span>Mouse or touch to inspect the route. Focus the scene for keyboard orbit, pan, zoom, and reset.</span>
+        <span>Mouse or touch to inspect the route. Focus the scene then use WASD/arrows to pan, Q/E for altitude, Shift to accelerate, +/- to zoom, R to reset.</span>
       </div>
     </section>
     <aside class="trip-panel">
@@ -188,9 +188,13 @@ let terrainRuntime: TerrainRuntime | null = null;
 let tripBundle: TripBundle | null = null;
 let animationHandle = 0;
 
-const KEYBOARD_ORBIT_STEP = 0.08;
 const KEYBOARD_ZOOM_FACTOR = 1.16;
-const KEYBOARD_PAN_STEP_RATIO = 0.04;
+
+const clock = new THREE.Clock();
+const pressedKeys = new Set<string>();
+const keyboardForward = new THREE.Vector3();
+const keyboardRight = new THREE.Vector3();
+const keyboardOffset = new THREE.Vector3();
 
 function setStatus(message: string, isError = false) {
 	statusNode.textContent = message;
@@ -263,8 +267,7 @@ function formatIsoDateTime(value: string | number | null) {
 		return null;
 	}
 
-	const parsed =
-		typeof value === "number" ? value : Date.parse(value);
+	const parsed = typeof value === "number" ? value : Date.parse(value);
 	if (Number.isNaN(parsed)) {
 		return typeof value === "string" ? value : null;
 	}
@@ -294,12 +297,13 @@ function interpolateTimelinePoint(
 		x: THREE.MathUtils.lerp(start.x, end.x, t),
 		y:
 			THREE.MathUtils.lerp(start.terrainHeight, end.terrainHeight, t) +
-			TRACK_SURFACE_OFFSET + 28,
+			TRACK_SURFACE_OFFSET +
+			28,
 		z: THREE.MathUtils.lerp(start.z, end.z, t),
 		time:
 			start.time !== null && end.time !== null
 				? Math.round(THREE.MathUtils.lerp(start.time, end.time, t))
-				: start.time ?? end.time ?? null,
+				: (start.time ?? end.time ?? null),
 	};
 }
 
@@ -327,7 +331,11 @@ function collectTimelineLabelAnchors(segments: TripTrackSegment[]) {
 	});
 
 	const totalDistance = orderedPoints.at(-1)?.distanceKm ?? 0;
-	for (let targetDistanceKm = 5; targetDistanceKm < totalDistance; targetDistanceKm += 5) {
+	for (
+		let targetDistanceKm = 5;
+		targetDistanceKm < totalDistance;
+		targetDistanceKm += 5
+	) {
 		for (let index = 1; index < orderedPoints.length; index += 1) {
 			const start = orderedPoints[index - 1];
 			const end = orderedPoints[index];
@@ -400,7 +408,9 @@ function updateTrackTimelineLabels() {
 	}
 
 	for (const label of trackTimelineLabels) {
-		const projected = new THREE.Vector3(label.x, label.y, label.z).project(camera);
+		const projected = new THREE.Vector3(label.x, label.y, label.z).project(
+			camera,
+		);
 		const visible =
 			projected.z >= -1 &&
 			projected.z <= 1 &&
@@ -430,7 +440,7 @@ function drawCardTextBlock(
 	const dateLabel = formatIsoDateTime(captureTime);
 	const hasDescription = Boolean(description && description.trim().length > 0);
 	const lines = [
-		hasDescription ? description?.trim() ?? null : null,
+		hasDescription ? (description?.trim() ?? null) : null,
 		dateLabel,
 	].filter((value): value is string => Boolean(value));
 
@@ -450,7 +460,9 @@ function drawCardTextBlock(
 
 	if (dateLabel) {
 		context.fillStyle = "rgba(255, 246, 221, 0.88)";
-		context.font = hasDescription ? "500 22px 'Avenir Next'" : "600 26px 'Avenir Next'";
+		context.font = hasDescription
+			? "500 22px 'Avenir Next'"
+			: "600 26px 'Avenir Next'";
 		context.fillText(
 			dateLabel,
 			28,
@@ -611,39 +623,6 @@ function focusScene(metadata: TerrainMetadata) {
 	controls.update();
 }
 
-function orbitCamera(deltaAzimuth: number, deltaPolar: number) {
-	const offset = camera.position.clone().sub(controls.target);
-	const spherical = new THREE.Spherical().setFromVector3(offset);
-	spherical.theta += deltaAzimuth;
-	spherical.phi = THREE.MathUtils.clamp(
-		spherical.phi + deltaPolar,
-		0.0001,
-		controls.maxPolarAngle,
-	);
-	offset.setFromSpherical(spherical);
-	camera.position.copy(controls.target).add(offset);
-	controls.update();
-}
-
-function panCamera(horizontal: number, depth: number) {
-	const offset = camera.position.clone().sub(controls.target);
-	const distance = Math.max(offset.length(), controls.minDistance);
-	const panStep = Math.max(distance * KEYBOARD_PAN_STEP_RATIO, 30);
-	const forward = controls.target.clone().sub(camera.position);
-	forward.y = 0;
-	if (forward.lengthSq() === 0) {
-		forward.set(0, 0, -1);
-	}
-	forward.normalize();
-	const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
-	const translation = right
-		.multiplyScalar(horizontal * panStep)
-		.add(forward.multiplyScalar(depth * panStep));
-	camera.position.add(translation);
-	controls.target.add(translation);
-	controls.update();
-}
-
 function zoomCamera(scale: number) {
 	const offset = camera.position.clone().sub(controls.target);
 	const currentDistance = offset.length();
@@ -657,6 +636,68 @@ function zoomCamera(scale: number) {
 	controls.update();
 }
 
+function updateKeyboardNavigation(deltaSeconds: number) {
+	if (!terrainRuntime || pressedKeys.size === 0) {
+		return;
+	}
+
+	keyboardForward.subVectors(controls.target, camera.position);
+	keyboardForward.y = 0;
+	if (keyboardForward.lengthSq() < 1e-6) {
+		camera.getWorldDirection(keyboardForward);
+		keyboardForward.y = 0;
+	}
+	if (keyboardForward.lengthSq() < 1e-6) {
+		return;
+	}
+
+	keyboardForward.normalize();
+	keyboardRight.crossVectors(keyboardForward, camera.up).normalize();
+	keyboardOffset.set(0, 0, 0);
+
+	if (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp")) {
+		keyboardOffset.add(keyboardForward);
+	}
+	if (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown")) {
+		keyboardOffset.sub(keyboardForward);
+	}
+	if (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight")) {
+		keyboardOffset.add(keyboardRight);
+	}
+	if (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft")) {
+		keyboardOffset.sub(keyboardRight);
+	}
+	if (pressedKeys.has("KeyE") || pressedKeys.has("PageUp")) {
+		keyboardOffset.y += 1;
+	}
+	if (pressedKeys.has("KeyQ") || pressedKeys.has("PageDown")) {
+		keyboardOffset.y -= 1;
+	}
+
+	if (keyboardOffset.lengthSq() === 0) {
+		return;
+	}
+
+	const viewDistance = camera.position.distanceTo(controls.target);
+	const terrainSpan = Math.max(
+		terrainRuntime.metadata.sizeMeters.width,
+		terrainRuntime.metadata.sizeMeters.height,
+	);
+	const baseSpeed = THREE.MathUtils.clamp(
+		viewDistance * 1.45,
+		180,
+		terrainSpan * 0.24,
+	);
+	const speedMultiplier =
+		pressedKeys.has("ShiftLeft") || pressedKeys.has("ShiftRight") ? 2.5 : 1;
+	const movement = keyboardOffset
+		.normalize()
+		.multiplyScalar(baseSpeed * speedMultiplier * deltaSeconds);
+
+	camera.position.add(movement);
+	controls.target.add(movement);
+}
+
 function handleViewerKeyboard(event: KeyboardEvent) {
 	if (document.activeElement !== canvas) {
 		return;
@@ -667,38 +708,6 @@ function handleViewerKeyboard(event: KeyboardEvent) {
 	}
 
 	switch (event.key) {
-		case "ArrowLeft":
-			event.preventDefault();
-			if (event.shiftKey) {
-				panCamera(-1, 0);
-			} else {
-				orbitCamera(-KEYBOARD_ORBIT_STEP, 0);
-			}
-			return;
-		case "ArrowRight":
-			event.preventDefault();
-			if (event.shiftKey) {
-				panCamera(1, 0);
-			} else {
-				orbitCamera(KEYBOARD_ORBIT_STEP, 0);
-			}
-			return;
-		case "ArrowUp":
-			event.preventDefault();
-			if (event.shiftKey) {
-				panCamera(0, 1);
-			} else {
-				orbitCamera(0, -KEYBOARD_ORBIT_STEP);
-			}
-			return;
-		case "ArrowDown":
-			event.preventDefault();
-			if (event.shiftKey) {
-				panCamera(0, -1);
-			} else {
-				orbitCamera(0, KEYBOARD_ORBIT_STEP);
-			}
-			return;
 		case "+":
 		case "=":
 			event.preventDefault();
@@ -881,7 +890,9 @@ async function loadTerrainAndTrip() {
 }
 
 function animate() {
+	const deltaSeconds = Math.min(clock.getDelta(), 0.1);
 	animationHandle = window.requestAnimationFrame(animate);
+	updateKeyboardNavigation(deltaSeconds);
 	controls.update();
 	updateTrackTimelineLabels();
 	renderer.render(scene, camera);
@@ -895,6 +906,22 @@ resetButton.addEventListener("click", () => {
 canvas.addEventListener("keydown", handleViewerKeyboard);
 canvas.addEventListener("pointerdown", () => {
 	canvas.focus({ preventScroll: true });
+});
+window.addEventListener("keydown", (event) => {
+	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) {
+		return;
+	}
+	if (document.activeElement !== canvas) {
+		return;
+	}
+	pressedKeys.add(event.code);
+	event.preventDefault();
+});
+window.addEventListener("keyup", (event) => {
+	pressedKeys.delete(event.code);
+});
+window.addEventListener("blur", () => {
+	pressedKeys.clear();
 });
 
 const resizeObserver = new ResizeObserver(() => resizeRenderer());

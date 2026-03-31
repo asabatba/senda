@@ -828,10 +828,7 @@ function resolveImagePlacement(
 				lat: Number.parseFloat(manifest.lat),
 				lon: Number.parseFloat(manifest.lon),
 				projected,
-				captureTime: normalizeTimestamp(
-					manifest.time,
-					imageTimeHourCorrection,
-				),
+				captureTime: normalizeTimestamp(manifest.time, imageTimeHourCorrection),
 			};
 		}
 	}
@@ -1179,13 +1176,21 @@ function computeTrackCropBounds(metadata, trackSegments, paddingMeters) {
 	}
 
 	return {
-		west: clamp(west - paddingMeters, metadata.bounds.west, metadata.bounds.east),
+		west: clamp(
+			west - paddingMeters,
+			metadata.bounds.west,
+			metadata.bounds.east,
+		),
 		south: clamp(
 			south - paddingMeters,
 			metadata.bounds.south,
 			metadata.bounds.north,
 		),
-		east: clamp(east + paddingMeters, metadata.bounds.west, metadata.bounds.east),
+		east: clamp(
+			east + paddingMeters,
+			metadata.bounds.west,
+			metadata.bounds.east,
+		),
 		north: clamp(
 			north + paddingMeters,
 			metadata.bounds.south,
@@ -1288,17 +1293,13 @@ function boundsFromWindow(bounds, width, height, window) {
 	const maxRow = height - 1;
 	return {
 		west:
-			bounds.west +
-			(window.colStart / maxColumn) * (bounds.east - bounds.west),
+			bounds.west + (window.colStart / maxColumn) * (bounds.east - bounds.west),
 		south:
-			bounds.north -
-			(window.rowEnd / maxRow) * (bounds.north - bounds.south),
+			bounds.north - (window.rowEnd / maxRow) * (bounds.north - bounds.south),
 		east:
-			bounds.west +
-			(window.colEnd / maxColumn) * (bounds.east - bounds.west),
+			bounds.west + (window.colEnd / maxColumn) * (bounds.east - bounds.west),
 		north:
-			bounds.north -
-			(window.rowStart / maxRow) * (bounds.north - bounds.south),
+			bounds.north - (window.rowStart / maxRow) * (bounds.north - bounds.south),
 	};
 }
 
