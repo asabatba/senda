@@ -3,6 +3,7 @@ dist/
 
 data/
 .codex-tmp
+.trip-export/
 
 gocache
 .terrainbuild-cache/

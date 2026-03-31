@@ -8,7 +8,8 @@
 		"build": "vite build",
 		"preview": "vite preview",
 		"terrain:build": "go run ./cmd/terrainbuild",
-		"format": "biome check --write src"
+		"trip:build": "node ./scripts/trip/build-trip-export.mjs",
+		"format": "biome check --write src scripts"
 	},
 	"dependencies": {
 		"fflate": "^0.8.2",
