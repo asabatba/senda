@@ -524,6 +524,9 @@ async function buildClusterObject(
 	group.position.set(cluster.x, 0, cluster.z);
 	group.renderOrder = 30;
 
+	const CARD_W = 250;
+	const CARD_H = 164;
+	const CARD_GAP = 10;
 	const anchorY = cluster.terrainHeight * exaggeration + 6;
 	const cardY = anchorY + cluster.cardHeight;
 	const members = anchors.filter((anchor) => anchor.clusterId === cluster.id);
@@ -544,7 +547,7 @@ async function buildClusterObject(
 
 	const lineGeometry = new THREE.BufferGeometry().setFromPoints([
 		new THREE.Vector3(0, anchorY + 10, 0),
-		new THREE.Vector3(0, cardY - 78, 0),
+		new THREE.Vector3(0, cardY - CARD_H / 2, 0),
 	]);
 	const line = new THREE.Line(
 		lineGeometry,
@@ -575,9 +578,9 @@ async function buildClusterObject(
 				depthTest: false,
 			}),
 		);
-		sprite.scale.set(250, 164, 1);
-		sprite.position.set(index * 14 - 12, cardY + index * 14, -index * 10);
-		sprite.renderOrder = 32;
+		sprite.scale.set(CARD_W, CARD_H, 1);
+		sprite.position.set(0, cardY + index * (CARD_H + CARD_GAP), 0);
+		sprite.renderOrder = 32 + index;
 		group.add(sprite);
 	}
 
