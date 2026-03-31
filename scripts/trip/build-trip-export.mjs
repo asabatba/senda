@@ -344,12 +344,15 @@ function loadTracks(gpxPaths, terrain) {
 	const segments = [];
 	const lookupPoints = [];
 	let globalDistanceKm = 0;
+	let lookupSegmentIndex = 0;
 
 	for (const rawPath of gpxPaths) {
 		const pathValue = resolve(process.cwd(), rawPath);
 		const xmlText = readFileSync(pathValue, "utf8");
 		const parsedSegments = parseGpxSegments(xmlText);
 		for (const segment of parsedSegments) {
+			const lookupSegmentId = `${pathValue}#${lookupSegmentIndex}`;
+			lookupSegmentIndex += 1;
 			const projectedPoints = [];
 			let previousPoint = null;
 			for (const point of segment.points) {
@@ -369,6 +372,7 @@ function loadTracks(gpxPaths, terrain) {
 					time: point.time,
 					distanceKm: globalDistanceKm,
 					projected,
+					segmentId: lookupSegmentId,
 				};
 				lookupPoints.push(lookupPoint);
 				if (!projected) {
@@ -495,23 +499,50 @@ function readTagText(text, tagName) {
 }
 
 function buildTrackLookup(points) {
-	const timedPoints = points.filter((point) => typeof point.time === "number");
+	const timedSegments = Array.from(
+		points
+			.filter((point) => typeof point.time === "number")
+			.reduce((groups, point) => {
+				const group = groups.get(point.segmentId) ?? [];
+				group.push(point);
+				groups.set(point.segmentId, group);
+				return groups;
+			}, new Map())
+			.values(),
+	)
+		.map((segmentPoints) =>
+			segmentPoints.sort((left, right) => (left.time ?? 0) - (right.time ?? 0)),
+		)
+		.filter((segmentPoints) => segmentPoints.length >= 2)
+		.sort((left, right) => (left[0]?.time ?? 0) - (right[0]?.time ?? 0));
+
 	return {
 		points,
-		timedPoints,
+		timedSegments,
 		interpolateByTime(targetTime) {
-			if (timedPoints.length < 2) {
+			if (timedSegments.length === 0) {
 				return null;
 			}
-			for (let index = 1; index < timedPoints.length; index += 1) {
-				const prev = timedPoints[index - 1];
-				const next = timedPoints[index];
-				if ((prev.time ?? 0) <= targetTime && (next.time ?? 0) >= targetTime) {
-					return interpolateTrackPoint(
-						prev,
-						next,
-						(targetTime - prev.time) / Math.max(next.time - prev.time, 1),
-					);
+			for (const timedPoints of timedSegments) {
+				if (
+					targetTime < (timedPoints[0]?.time ?? Number.POSITIVE_INFINITY) ||
+					targetTime > (timedPoints.at(-1)?.time ?? Number.NEGATIVE_INFINITY)
+				) {
+					continue;
+				}
+				for (let index = 1; index < timedPoints.length; index += 1) {
+					const prev = timedPoints[index - 1];
+					const next = timedPoints[index];
+					if (
+						(prev.time ?? 0) <= targetTime &&
+						(next.time ?? 0) >= targetTime
+					) {
+						return interpolateTrackPoint(
+							prev,
+							next,
+							(targetTime - prev.time) / Math.max(next.time - prev.time, 1),
+						);
+					}
 				}
 			}
 			return null;
@@ -820,11 +851,19 @@ function placeImages(images, csvEntries, lookup, terrain, timeOptions) {
 }
 
 function resolveImagePlacement(image, manifest, lookup, terrain, timeOptions) {
+	const MAX_EXIF_GPS_TRACK_DISTANCE_METERS = 20;
 	const adjustedExifCaptureTime = adjustTimestamp(
 		image.exif.captureTime,
 		timeOptions,
 		true,
 	);
+	const csvTime = adjustTimestamp(manifest?.time ?? null, timeOptions, false);
+	const csvTimeInterpolated = csvTime
+		? lookup.interpolateByTime(Date.parse(csvTime))
+		: null;
+	const exifTimeInterpolated = adjustedExifCaptureTime
+		? lookup.interpolateByTime(Date.parse(adjustedExifCaptureTime))
+		: null;
 
 	if (manifest?.lat && manifest?.lon) {
 		const projected = projectLatLonToTerrain(
@@ -843,6 +882,16 @@ function resolveImagePlacement(image, manifest, lookup, terrain, timeOptions) {
 		}
 	}
 
+	if (csvTimeInterpolated?.projected) {
+		return {
+			placedBy: "csv-time",
+			lat: csvTimeInterpolated.lat,
+			lon: csvTimeInterpolated.lon,
+			projected: csvTimeInterpolated.projected,
+			captureTime: csvTime,
+		};
+	}
+
 	if (image.exif.lat !== null && image.exif.lon !== null) {
 		const projected = projectLatLonToTerrain(
 			image.exif.lat,
@@ -850,26 +899,29 @@ function resolveImagePlacement(image, manifest, lookup, terrain, timeOptions) {
 			terrain,
 		);
 		if (projected) {
+			if (exifTimeInterpolated?.projected) {
+				const exifDistanceFromTrack = distance2d(
+					projected.x,
+					projected.z,
+					exifTimeInterpolated.projected.x,
+					exifTimeInterpolated.projected.z,
+				);
+				if (exifDistanceFromTrack > MAX_EXIF_GPS_TRACK_DISTANCE_METERS) {
+					return {
+						placedBy: "exif-time",
+						lat: exifTimeInterpolated.lat,
+						lon: exifTimeInterpolated.lon,
+						projected: exifTimeInterpolated.projected,
+						captureTime: adjustedExifCaptureTime,
+					};
+				}
+			}
 			return {
 				placedBy: "exif-gps",
 				lat: image.exif.lat,
 				lon: image.exif.lon,
 				projected,
 				captureTime: adjustedExifCaptureTime,
-			};
-		}
-	}
-
-	const csvTime = adjustTimestamp(manifest?.time ?? null, timeOptions, false);
-	if (csvTime) {
-		const interpolated = lookup.interpolateByTime(Date.parse(csvTime));
-		if (interpolated?.projected) {
-			return {
-				placedBy: "csv-time",
-				lat: interpolated.lat,
-				lon: interpolated.lon,
-				projected: interpolated.projected,
-				captureTime: csvTime,
 			};
 		}
 	}
@@ -889,19 +941,14 @@ function resolveImagePlacement(image, manifest, lookup, terrain, timeOptions) {
 		}
 	}
 
-	if (adjustedExifCaptureTime) {
-		const interpolated = lookup.interpolateByTime(
-			Date.parse(adjustedExifCaptureTime),
-		);
-		if (interpolated?.projected) {
-			return {
-				placedBy: "exif-time",
-				lat: interpolated.lat,
-				lon: interpolated.lon,
-				projected: interpolated.projected,
-				captureTime: adjustedExifCaptureTime,
-			};
-		}
+	if (exifTimeInterpolated?.projected) {
+		return {
+			placedBy: "exif-time",
+			lat: exifTimeInterpolated.lat,
+			lon: exifTimeInterpolated.lon,
+			projected: exifTimeInterpolated.projected,
+			captureTime: adjustedExifCaptureTime,
+		};
 	}
 
 	return null;

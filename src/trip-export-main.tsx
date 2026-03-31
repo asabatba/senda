@@ -92,6 +92,9 @@ type TerrainRuntime = {
 type TrackTimelineLabel = {
 	anchor: THREE.Object3D;
 	element: HTMLDivElement;
+	text: string;
+	timeMs: number | null;
+	priority: number;
 };
 
 // ─── Signals ──────────────────────────────────────────────────────────────────
@@ -314,8 +317,6 @@ function renderTrackSegments(
 		scene.add(line);
 		trackLines.push(line);
 	}
-
-	buildTrackTimelineLabels(segments, exaggeration);
 }
 
 function formatIsoDateTime(value: string | number | null, timezone?: string) {
@@ -385,7 +386,17 @@ type TimelineAnchor = {
 	y: number;
 	z: number;
 	time: number | null;
-	kind: "start" | "end" | "hour";
+	kind: "start" | "end" | "hour" | "photo";
+};
+
+type TimelineLabelCandidate = {
+	x: number;
+	y: number;
+	z: number;
+	timeMs: number | null;
+	text: string;
+	priority: number;
+	alwaysShow?: boolean;
 };
 
 function collectTimelineLabelAnchors(
@@ -436,7 +447,7 @@ function formatTimelineLabel(
 	kind: TimelineAnchor["kind"],
 ): string | null {
 	if (time === null) return null;
-	if (kind === "hour") {
+	if (kind !== "start" && kind !== "end") {
 		const timezone = tripBundle?.display.timezone;
 		if (timezone) {
 			const parts = new Intl.DateTimeFormat("en-US", {
@@ -446,7 +457,10 @@ function formatTimelineLabel(
 				hour12: false,
 			}).formatToParts(new Date(time));
 			const h = parts.find((p) => p.type === "hour")?.value ?? "00";
-			return `${h}:00`;
+
+			const m = parts.find((p) => p.type === "minute")?.value ?? "00";
+
+			return `${h}:${m}`;
 		}
 		return new Date(time).toISOString().slice(11, 16);
 	}
@@ -458,7 +472,8 @@ function worldToHeightmapSample(
 	x: number,
 	z: number,
 ) {
-	const normalizedX = (x + metadata.sizeMeters.width / 2) / metadata.sizeMeters.width;
+	const normalizedX =
+		(x + metadata.sizeMeters.width / 2) / metadata.sizeMeters.width;
 	const normalizedY =
 		(z + metadata.sizeMeters.height / 2) / metadata.sizeMeters.height;
 	return {
@@ -474,7 +489,10 @@ function isLabelOccludedByTerrain(worldPos: THREE.Vector3) {
 
 	const { metadata, heights, currentExaggeration } = terrainRuntime;
 	const cameraPos = camera.position;
-	const horizontalDistance = Math.hypot(worldPos.x - cameraPos.x, worldPos.z - cameraPos.z);
+	const horizontalDistance = Math.hypot(
+		worldPos.x - cameraPos.x,
+		worldPos.z - cameraPos.z,
+	);
 	if (horizontalDistance < 1) {
 		return false;
 	}
@@ -507,11 +525,43 @@ function isLabelOccludedByTerrain(worldPos: THREE.Vector3) {
 	return false;
 }
 
+function appendTimelineLabel(
+	x: number,
+	y: number,
+	z: number,
+	text: string,
+	timeMs: number | null,
+	priority: number,
+) {
+	const element = document.createElement("div");
+	element.className = "trip-track-label";
+	element.textContent = text;
+	element.hidden = true;
+	viewerOverlay.append(element);
+
+	const anchorObject = new THREE.Object3D();
+	anchorObject.position.set(x, y, z);
+	scene.add(anchorObject);
+
+	trackTimelineLabels.push({
+		anchor: anchorObject,
+		element,
+		text,
+		timeMs,
+		priority,
+	});
+	return true;
+}
+
 function buildTrackTimelineLabels(
 	segments: TripTrackSegment[],
+	clusters: TripCluster[],
+	photoAnchors: TripPhotoAnchor[],
 	exaggeration: number,
 ) {
 	clearTrackTimelineLabels();
+
+	const candidates: TimelineLabelCandidate[] = [];
 
 	for (const segment of segments) {
 		for (const anchor of collectTimelineLabelAnchors(
@@ -520,22 +570,74 @@ function buildTrackTimelineLabels(
 		)) {
 			const text = formatTimelineLabel(anchor.time, anchor.kind);
 			if (!text) continue;
-
-			const element = document.createElement("div");
-			element.className = "trip-track-label";
-			element.textContent = text;
-			element.hidden = true;
-			viewerOverlay.append(element);
-
-			const anchorObject = new THREE.Object3D();
-			anchorObject.position.set(anchor.x, anchor.y, anchor.z);
-			scene.add(anchorObject);
-
-			trackTimelineLabels.push({
-				anchor: anchorObject,
-				element,
+			candidates.push({
+				x: anchor.x,
+				y: anchor.y,
+				z: anchor.z,
+				timeMs: anchor.time,
+				text,
+				priority: anchor.kind === "hour" ? 2 : 0,
+				alwaysShow: anchor.kind === "start" || anchor.kind === "end",
 			});
 		}
+	}
+
+	for (const cluster of clusters) {
+		const clusterTimeMs =
+			photoAnchors
+				.filter((anchor) => anchor.clusterId === cluster.id)
+				.map((anchor) => anchor.captureTime)
+				.filter((value): value is string => Boolean(value))
+				.map((value) => Date.parse(value))
+				.filter((value) => !Number.isNaN(value))
+				.sort((a, b) => a - b)[0] ?? null;
+		if (clusterTimeMs === null) continue;
+
+		const text = formatTimelineLabel(clusterTimeMs, "photo");
+		if (!text) continue;
+
+		candidates.push({
+			x: cluster.x,
+			y: cluster.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET + 28,
+			z: cluster.z,
+			timeMs: clusterTimeMs,
+			text,
+			priority: 1,
+		});
+	}
+
+	candidates.sort((a, b) => {
+		if (a.priority !== b.priority) {
+			return a.priority - b.priority;
+		}
+		if (a.timeMs === null && b.timeMs === null) return 0;
+		if (a.timeMs === null) return -1;
+		if (b.timeMs === null) return 1;
+		return a.timeMs - b.timeMs;
+	});
+
+	const MIN_TIME_GAP_MS = 20 * 60 * 1000;
+	for (const candidate of candidates) {
+		const tooCloseInTime =
+			!candidate.alwaysShow &&
+			candidate.timeMs !== null &&
+			trackTimelineLabels.some(
+				(label) =>
+					label.timeMs !== null &&
+					Math.abs(label.timeMs - candidate.timeMs) <= MIN_TIME_GAP_MS,
+			);
+		if (tooCloseInTime) {
+			continue;
+		}
+
+		appendTimelineLabel(
+			candidate.x,
+			candidate.y,
+			candidate.z,
+			candidate.text,
+			candidate.timeMs,
+			candidate.priority,
+		);
 	}
 }
 
@@ -574,50 +676,30 @@ function drawCardTextBlock(
 	width: number,
 	height: number,
 	description: string | null,
-	captureTime: string | null,
 ) {
-	const dateLabel = formatIsoDateTime(
-		captureTime,
-		tripBundle?.display.timezone,
-	);
 	const hasDescription = Boolean(description && description.trim().length > 0);
-	const lines = [
-		hasDescription ? (description?.trim() ?? null) : null,
-		dateLabel,
-	].filter((value): value is string => Boolean(value));
+	const lines = [hasDescription ? (description?.trim() ?? null) : null].filter(
+		(value): value is string => Boolean(value),
+	);
 
 	if (lines.length === 0) {
 		return;
 	}
 
-	const blockHeight = hasDescription ? 114 : 74;
+	const blockHeight = 74;
 	context.fillStyle = "rgba(12, 18, 21, 0.54)";
 	context.fillRect(0, height - blockHeight, width, blockHeight);
 
 	if (hasDescription) {
 		context.fillStyle = "#fff6dd";
 		context.font = "600 28px Georgia";
-		context.fillText(lines[0], 28, height - 64, width - 56);
-	}
-
-	if (dateLabel) {
-		context.fillStyle = "rgba(255, 246, 221, 0.88)";
-		context.font = hasDescription
-			? "500 22px 'Avenir Next'"
-			: "600 26px 'Avenir Next'";
-		context.fillText(
-			dateLabel,
-			28,
-			hasDescription ? height - 28 : height - 32,
-			width - 56,
-		);
+		context.fillText(lines[0], 28, height - 28, width - 56);
 	}
 }
 
 async function loadTextureFromImage(
 	imageUrl: string,
 	description: string | null,
-	captureTime: string | null,
 ) {
 	const image = await new Promise<HTMLImageElement>((resolveImage, reject) => {
 		const element = new Image();
@@ -646,7 +728,7 @@ async function loadTextureFromImage(
 	context.fillStyle = "#102127";
 	context.fillRect(0, 0, width, height);
 	context.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
-	drawCardTextBlock(context, width, height, description, captureTime);
+	drawCardTextBlock(context, width, height, description);
 	context.strokeStyle = "rgba(255, 246, 221, 0.34)";
 	context.lineWidth = 12;
 	context.strokeRect(6, 6, width - 12, height - 12);
@@ -705,7 +787,6 @@ async function buildClusterObject(
 		const texture = await loadTextureFromImage(
 			preview.imageUrl,
 			index === 0 ? preview.description : null,
-			index === 0 ? preview.captureTime : null,
 		);
 		const sprite = new THREE.Sprite(
 			new THREE.SpriteMaterial({
@@ -973,6 +1054,12 @@ async function loadTerrainAndTrip() {
 
 	renderTrackSegments(trip.trackSegments, terrainRuntime.currentExaggeration);
 	await renderClusters(
+		trip.clusters,
+		trip.photoAnchors,
+		terrainRuntime.currentExaggeration,
+	);
+	buildTrackTimelineLabels(
+		trip.trackSegments,
 		trip.clusters,
 		trip.photoAnchors,
 		terrainRuntime.currentExaggeration,
