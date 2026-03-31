@@ -71,8 +71,6 @@ const orthophotoOptions = signal<OrthophotoOption[]>([]);
 const selectedPreset = signal<OrthophotoPresetId | "">("");
 const presetSelectDisabled = signal(true);
 const orthophotoControlVisible = signal(false);
-const exaggerationDisplay = signal("1.0x");
-const exaggerationRange = signal("1.0");
 const trackFeedback = signal<TrackFeedback>(null);
 const trackItems = signal<TrackOverlay[]>([]);
 const namedPlaceToggleVisible = signal(false);
@@ -181,19 +179,6 @@ function App() {
 							</select>
 						</label>
 					)}
-
-					<label class="control">
-						<span>Vertical exaggeration</span>
-						<input
-							type="range"
-							min="0.8"
-							max="2"
-							step="0.1"
-							value={exaggerationRange.value}
-							onInput={handleExaggerationInput}
-						/>
-						<strong>{exaggerationDisplay.value}</strong>
-					</label>
 
 					{namedPlaceToggleVisible.value && (
 						<label class="control control-toggle">
@@ -339,29 +324,6 @@ async function handlePresetChange(event: Event) {
 		return;
 	}
 	await applyOrthophotoPreset(nextPreset);
-}
-
-function handleExaggerationInput(event: Event) {
-	if (!terrainRuntime) return;
-	const input = event.target as HTMLInputElement;
-	const exaggeration = Number.parseFloat(input.value);
-	terrainRuntime.currentExaggeration = exaggeration;
-	applyVerticalExaggeration(
-		terrainRuntime.geometry,
-		terrainRuntime.heights,
-		exaggeration,
-	);
-	syncTrackOverlayGeometries(exaggeration);
-	if (terrainRuntime.namedPlaceOverlay && terrainRuntime.namedPlacesVisible) {
-		updateNamedPlaceOverlay(
-			terrainRuntime.namedPlaceOverlay,
-			exaggeration,
-			camera,
-			canvas,
-		);
-	}
-	exaggerationRange.value = input.value;
-	exaggerationDisplay.value = `${exaggeration.toFixed(1)}x`;
 }
 
 async function handleGpxChange(event: Event) {
@@ -574,12 +536,6 @@ function updateTrackOverlayGeometry(
 		line.computeLineDistances();
 	});
 	overlay.bounds = computeTrackBounds(overlay, exaggeration);
-}
-
-function syncTrackOverlayGeometries(exaggeration: number) {
-	for (const overlay of trackOverlays) {
-		updateTrackOverlayGeometry(overlay, exaggeration);
-	}
 }
 
 function disposeTrackOverlay(overlay: TrackOverlay) {
@@ -983,6 +939,9 @@ async function loadTerrain() {
 		map: surfaceTexture,
 		roughness: 0.96,
 		metalness: 0.02,
+		polygonOffset: true,
+		polygonOffsetFactor: 1,
+		polygonOffsetUnits: 1,
 	});
 
 	const mesh = new THREE.Mesh(geometry, material);
@@ -1010,9 +969,6 @@ async function loadTerrain() {
 			? getStoredNamedPlacesVisible()
 			: false,
 	};
-
-	exaggerationRange.value = metadata.defaultVerticalExaggeration.toFixed(1);
-	exaggerationDisplay.value = `${metadata.defaultVerticalExaggeration.toFixed(1)}x`;
 
 	updateStats(metadata, currentPreset);
 	renderNamedPlaceLegend(metadata);

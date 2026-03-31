@@ -9,7 +9,11 @@ import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 
 import { inflateBinaryAsset } from "./terrain/assets";
-import { KEYBOARD_MOVE_CODES, TRACK_SURFACE_OFFSET } from "./terrain/constants";
+import {
+	KEYBOARD_MOVE_CODES,
+	TRACK_COLORS,
+	TRACK_SURFACE_OFFSET,
+} from "./terrain/constants";
 import { applyVerticalExaggeration, buildHeightArray } from "./terrain/heights";
 import { buildSurfaceTexture } from "./terrain/texture";
 import type { OrthophotoPresetId, TerrainMetadata } from "./terrain/types";
@@ -76,6 +80,7 @@ type TerrainRuntime = {
 	metadata: TerrainMetadata;
 	geometry: THREE.PlaneGeometry;
 	heights: Float32Array;
+	heightCodes: Uint16Array;
 	mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
 	currentExaggeration: number;
 };
@@ -84,7 +89,6 @@ type TrackTimelineLabel = {
 	x: number;
 	y: number;
 	z: number;
-	text: string;
 	element: HTMLDivElement;
 };
 
@@ -219,6 +223,7 @@ const pressedKeys = new Set<string>();
 const keyboardForward = new THREE.Vector3();
 const keyboardRight = new THREE.Vector3();
 const keyboardOffset = new THREE.Vector3();
+const labelWorldPos = new THREE.Vector3();
 
 // ─── UI callbacks (used in components) ────────────────────────────────────────
 
@@ -287,24 +292,22 @@ function renderTrackSegments(
 	}
 	trackLines.length = 0;
 
-	for (const segment of segments) {
+	for (const [index, segment] of segments.entries()) {
 		const geometry = new LineGeometry();
 		geometry.setPositions(buildTrackPositions(segment.points, exaggeration));
 
 		const material = new LineMaterial({
-			color: "#ff8d5d",
+			color: TRACK_COLORS[index % TRACK_COLORS.length],
 			linewidth: 4,
 			transparent: true,
 			opacity: 0.96,
 			depthWrite: false,
-			depthTest: false,
 		});
 		material.resolution.set(canvas.clientWidth, canvas.clientHeight);
 
 		const line = new Line2(geometry, material);
 		line.computeLineDistances();
 		line.frustumCulled = false;
-		line.renderOrder = 12;
 		scene.add(line);
 		trackLines.push(line);
 	}
@@ -347,104 +350,106 @@ function clearTrackTimelineLabels() {
 	trackTimelineLabels.length = 0;
 }
 
-function interpolateTimelinePoint(
-	start: TripTrackPoint,
-	end: TripTrackPoint,
-	targetDistanceKm: number,
-) {
-	const distanceSpan = end.distanceKm - start.distanceKm;
-	const t =
-		distanceSpan <= 1e-9
-			? 0
-			: (targetDistanceKm - start.distanceKm) / distanceSpan;
-
-	return {
-		x: THREE.MathUtils.lerp(start.x, end.x, t),
-		y:
-			THREE.MathUtils.lerp(start.terrainHeight, end.terrainHeight, t) +
-			TRACK_SURFACE_OFFSET +
-			28,
-		z: THREE.MathUtils.lerp(start.z, end.z, t),
-		time:
-			start.time !== null && end.time !== null
-				? Math.round(THREE.MathUtils.lerp(start.time, end.time, t))
-				: (start.time ?? end.time ?? null),
-	};
+function interpolateAtTime(points: TripTrackPoint[], targetMs: number) {
+	for (let i = 1; i < points.length; i += 1) {
+		const start = points[i - 1]!;
+		const end = points[i]!;
+		if (start.time === null || end.time === null) continue;
+		if (start.time <= targetMs && end.time >= targetMs) {
+			const span = end.time - start.time;
+			const t = span <= 0 ? 0 : (targetMs - start.time) / span;
+			return {
+				x: THREE.MathUtils.lerp(start.x, end.x, t),
+				y:
+					THREE.MathUtils.lerp(start.terrainHeight, end.terrainHeight, t) +
+					TRACK_SURFACE_OFFSET +
+					28,
+				z: THREE.MathUtils.lerp(start.z, end.z, t),
+			};
+		}
+	}
+	return null;
 }
 
-function collectTimelineLabelAnchors(segments: TripTrackSegment[]) {
-	const orderedPoints = segments.flatMap((segment) => segment.points);
-	if (orderedPoints.length === 0) {
-		return [];
-	}
+type TimelineAnchor = {
+	x: number;
+	y: number;
+	z: number;
+	time: number | null;
+	kind: "start" | "end" | "hour";
+};
 
-	const anchors: Array<{
-		x: number;
-		y: number;
-		z: number;
-		time: number | null;
-		distanceKm: number;
-	}> = [];
+function collectTimelineLabelAnchors(
+	segments: TripTrackSegment[],
+): TimelineAnchor[] {
+	const orderedPoints = segments.flatMap((s) => s.points);
+	if (orderedPoints.length === 0) return [];
 
-	const firstPoint = orderedPoints[0];
+	const firstPoint = orderedPoints[0]!;
+	const lastPoint = orderedPoints.at(-1)!;
+	const anchors: TimelineAnchor[] = [];
+
 	anchors.push({
 		x: firstPoint.x,
 		y: firstPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
 		z: firstPoint.z,
 		time: firstPoint.time,
-		distanceKm: firstPoint.distanceKm,
+		kind: "start",
 	});
 
-	const totalDistance = orderedPoints.at(-1)?.distanceKm ?? 0;
-	for (
-		let targetDistanceKm = 5;
-		targetDistanceKm < totalDistance;
-		targetDistanceKm += 5
-	) {
-		for (let index = 1; index < orderedPoints.length; index += 1) {
-			const start = orderedPoints[index - 1];
-			const end = orderedPoints[index];
-			if (
-				start.distanceKm <= targetDistanceKm &&
-				end.distanceKm >= targetDistanceKm
-			) {
-				const interpolated = interpolateTimelinePoint(
-					start,
-					end,
-					targetDistanceKm,
-				);
-				anchors.push({
-					...interpolated,
-					distanceKm: targetDistanceKm,
-				});
-				break;
-			}
+	const startMs = firstPoint.time;
+	const endMs = lastPoint.time;
+	if (startMs !== null && endMs !== null && endMs > startMs) {
+		const MIN_GAP_MS = 10 * 60 * 1000;
+		const HOUR_MS = 3_600_000;
+		const firstHour = Math.ceil(startMs / HOUR_MS) * HOUR_MS;
+		for (let t = firstHour; t < endMs; t += HOUR_MS) {
+			if (t - startMs < MIN_GAP_MS) continue;
+			if (endMs - t < MIN_GAP_MS) continue;
+			const pos = interpolateAtTime(orderedPoints, t);
+			if (pos) anchors.push({ ...pos, time: t, kind: "hour" });
 		}
 	}
 
-	const lastPoint = orderedPoints.at(-1);
-	const previousDistance = anchors.at(-1)?.distanceKm ?? 0;
-	if (lastPoint && totalDistance - previousDistance >= 4) {
-		anchors.push({
-			x: lastPoint.x,
-			y: lastPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
-			z: lastPoint.z,
-			time: lastPoint.time,
-			distanceKm: lastPoint.distanceKm,
-		});
-	}
+	anchors.push({
+		x: lastPoint.x,
+		y: lastPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
+		z: lastPoint.z,
+		time: lastPoint.time,
+		kind: "end",
+	});
 
 	return anchors;
+}
+
+function formatTimelineLabel(
+	time: number | null,
+	kind: TimelineAnchor["kind"],
+): string | null {
+	if (time === null) return null;
+	if (kind === "hour") {
+		const timezone = tripBundle?.display.timezone;
+		if (timezone) {
+			const parts = new Intl.DateTimeFormat("en-US", {
+				timeZone: timezone,
+				hour: "2-digit",
+				minute: "2-digit",
+				hour12: false,
+			}).formatToParts(new Date(time));
+			const h = parts.find((p) => p.type === "hour")?.value ?? "00";
+			return `${h}:00`;
+		}
+		return new Date(time).toISOString().slice(11, 16);
+	}
+	return formatIsoDateTime(time, tripBundle?.display.timezone);
 }
 
 function buildTrackTimelineLabels(segments: TripTrackSegment[]) {
 	clearTrackTimelineLabels();
 
 	for (const anchor of collectTimelineLabelAnchors(segments)) {
-		const text = formatIsoDateTime(anchor.time, tripBundle?.display.timezone);
-		if (!text) {
-			continue;
-		}
+		const text = formatTimelineLabel(anchor.time, anchor.kind);
+		if (!text) continue;
 
 		const element = document.createElement("div");
 		element.className = "trip-track-label";
@@ -455,28 +460,23 @@ function buildTrackTimelineLabels(segments: TripTrackSegment[]) {
 			x: anchor.x,
 			y: anchor.y,
 			z: anchor.z,
-			text,
 			element,
 		});
 	}
 }
 
 function updateTrackTimelineLabels() {
-	if (trackTimelineLabels.length === 0) {
-		return;
-	}
+	if (trackTimelineLabels.length === 0) return;
 
 	const width = canvas.clientWidth;
 	const height = canvas.clientHeight;
-	if (!width || !height) {
-		return;
-	}
+	if (!width || !height) return;
 
 	for (const label of trackTimelineLabels) {
-		const projected = new THREE.Vector3(label.x, label.y, label.z).project(
-			camera,
-		);
-		const visible =
+		labelWorldPos.set(label.x, label.y, label.z);
+		const projected = labelWorldPos.clone().project(camera);
+
+		const inFrustum =
 			projected.z >= -1 &&
 			projected.z <= 1 &&
 			projected.x >= -1.08 &&
@@ -484,10 +484,51 @@ function updateTrackTimelineLabels() {
 			projected.y >= -1.08 &&
 			projected.y <= 1.08;
 
-		label.element.hidden = !visible;
-		if (!visible) {
-			continue;
+		let visible = inFrustum;
+		if (visible && terrainRuntime) {
+			const { metadata, heights } = terrainRuntime;
+			const exaggeration = terrainRuntime.currentExaggeration;
+			const gridW = metadata.width;
+			const gridH = metadata.height;
+			const halfW = metadata.sizeMeters.width / 2;
+			const halfH = metadata.sizeMeters.height / 2;
+			const STEPS = 12;
+			let occluded = false;
+			for (let s = 1; s < STEPS; s += 1) {
+				const t = s / STEPS;
+				const px =
+					camera.position.x + (labelWorldPos.x - camera.position.x) * t;
+				const py =
+					camera.position.y + (labelWorldPos.y - camera.position.y) * t;
+				const pz =
+					camera.position.z + (labelWorldPos.z - camera.position.z) * t;
+				const gx = ((px + halfW) / (halfW * 2)) * (gridW - 1);
+				const gz = ((pz + halfH) / (halfH * 2)) * (gridH - 1);
+				if (gx < 0 || gx > gridW - 1 || gz < 0 || gz > gridH - 1) continue;
+				// bilinear sample
+				const x0 = Math.floor(gx),
+					x1 = Math.min(gridW - 1, x0 + 1);
+				const z0 = Math.floor(gz),
+					z1 = Math.min(gridH - 1, z0 + 1);
+				const tx = gx - x0,
+					tz = gz - z0;
+				const h00 = heights[z0 * gridW + x0] ?? 0;
+				const h10 = heights[z0 * gridW + x1] ?? 0;
+				const h01 = heights[z1 * gridW + x0] ?? 0;
+				const h11 = heights[z1 * gridW + x1] ?? 0;
+				const terrainH =
+					(h00 * (1 - tx) + h10 * tx) * (1 - tz) +
+					(h01 * (1 - tx) + h11 * tx) * tz;
+				if (py < terrainH * exaggeration) {
+					occluded = true;
+					break;
+				}
+			}
+			visible = !occluded;
 		}
+
+		label.element.hidden = !visible;
+		if (!visible) continue;
 
 		const screenX = ((projected.x + 1) / 2) * width;
 		const screenY = ((1 - projected.y) / 2) * height;
@@ -605,12 +646,9 @@ async function buildClusterObject(
 			emissive: "#865f15",
 			roughness: 0.42,
 			metalness: 0.04,
-			depthTest: false,
-			depthWrite: false,
 		}),
 	);
 	marker.position.set(0, anchorY, 0);
-	marker.renderOrder = 31;
 	group.add(marker);
 
 	const lineGeometry = new THREE.BufferGeometry().setFromPoints([
@@ -623,11 +661,9 @@ async function buildClusterObject(
 			color: 0xf2d39a,
 			transparent: true,
 			opacity: 0.9,
-			depthTest: false,
 			depthWrite: false,
 		}),
 	);
-	line.renderOrder = 31;
 	group.add(line);
 
 	const previewMembers = members.slice(0, Math.min(members.length, 3));
@@ -643,7 +679,6 @@ async function buildClusterObject(
 				map: texture,
 				transparent: true,
 				depthWrite: false,
-				depthTest: false,
 			}),
 		);
 		sprite.scale.set(CARD_W, CARD_H, 1);
@@ -887,6 +922,9 @@ async function loadTerrainAndTrip() {
 		map: texture,
 		roughness: 0.96,
 		metalness: 0.03,
+		polygonOffset: true,
+		polygonOffsetFactor: 1,
+		polygonOffsetUnits: 1,
 	});
 	const mesh = new THREE.Mesh(geometry, material);
 	scene.add(mesh);
@@ -895,6 +933,7 @@ async function loadTerrainAndTrip() {
 		metadata,
 		geometry,
 		heights,
+		heightCodes,
 		mesh,
 		currentExaggeration: metadata.defaultVerticalExaggeration,
 	};
