@@ -14,7 +14,11 @@ import {
 	TRACK_COLORS,
 	TRACK_SURFACE_OFFSET,
 } from "./terrain/constants";
-import { applyVerticalExaggeration, buildHeightArray } from "./terrain/heights";
+import {
+	applyVerticalExaggeration,
+	buildHeightArray,
+	sampleHeightBilinear,
+} from "./terrain/heights";
 import { buildSurfaceTexture } from "./terrain/texture";
 import type { OrthophotoPresetId, TerrainMetadata } from "./terrain/types";
 
@@ -449,6 +453,60 @@ function formatTimelineLabel(
 	return formatIsoDateTime(time, tripBundle?.display.timezone);
 }
 
+function worldToHeightmapSample(
+	metadata: TerrainMetadata,
+	x: number,
+	z: number,
+) {
+	const normalizedX = (x + metadata.sizeMeters.width / 2) / metadata.sizeMeters.width;
+	const normalizedY =
+		(z + metadata.sizeMeters.height / 2) / metadata.sizeMeters.height;
+	return {
+		x: normalizedX * (metadata.width - 1),
+		y: normalizedY * (metadata.height - 1),
+	};
+}
+
+function isLabelOccludedByTerrain(worldPos: THREE.Vector3) {
+	if (!terrainRuntime) {
+		return false;
+	}
+
+	const { metadata, heights, currentExaggeration } = terrainRuntime;
+	const cameraPos = camera.position;
+	const horizontalDistance = Math.hypot(worldPos.x - cameraPos.x, worldPos.z - cameraPos.z);
+	if (horizontalDistance < 1) {
+		return false;
+	}
+
+	const sampleCount = THREE.MathUtils.clamp(
+		Math.ceil(horizontalDistance / 320),
+		6,
+		24,
+	);
+
+	for (let step = 1; step < sampleCount; step += 1) {
+		const t = step / sampleCount;
+		const sampleX = THREE.MathUtils.lerp(cameraPos.x, worldPos.x, t);
+		const sampleZ = THREE.MathUtils.lerp(cameraPos.z, worldPos.z, t);
+		const terrainSample = worldToHeightmapSample(metadata, sampleX, sampleZ);
+		const terrainHeight =
+			sampleHeightBilinear(
+				heights,
+				metadata.width,
+				metadata.height,
+				terrainSample.x,
+				terrainSample.y,
+			) * currentExaggeration;
+		const sightlineHeight = THREE.MathUtils.lerp(cameraPos.y, worldPos.y, t);
+		if (terrainHeight > sightlineHeight - 6) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 function buildTrackTimelineLabels(
 	segments: TripTrackSegment[],
 	exaggeration: number,
@@ -500,7 +558,7 @@ function updateTrackTimelineLabels() {
 			labelProjectedPos.y >= -1.08 &&
 			labelProjectedPos.y <= 1.08;
 
-		const visible = inFrustum;
+		const visible = inFrustum && !isLabelOccludedByTerrain(labelWorldPos);
 
 		label.element.hidden = !visible;
 		if (!visible) continue;
