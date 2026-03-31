@@ -193,6 +193,8 @@ body {
 	margin-top: 1.4rem;
 	display: grid;
 	gap: 0.85rem;
+	max-height: 30vh;
+	overflow: auto;
 }
 
 .trip-cluster-header {

@@ -1,5 +1,7 @@
 import "./style.css";
 
+import { signal } from "@preact/signals";
+import { render } from "preact";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
@@ -31,204 +33,288 @@ import type {
 	TrackSegment,
 } from "./terrain/types";
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 const ORTHOPHOTO_PRESET_STORAGE_KEY = "terrain.orthophotoPreset";
 const NAMED_PLACES_VISIBLE_STORAGE_KEY = "terrain.namedPlacesVisible";
 const ORTHOPHOTO_PRESET_ORDER: OrthophotoPresetId[] = ["2k", "4k", "8k"];
 
-const app = document.querySelector<HTMLDivElement>("#app");
-if (!app) {
-	throw new Error("Application root was not found.");
+// ─── Signals ──────────────────────────────────────────────────────────────────
+
+type OrthophotoOption = {
+	id: OrthophotoPresetId;
+	label: string;
+	disabled: boolean;
+};
+type TrackFeedback = {
+	message: string;
+	tone: "info" | "success" | "warning" | "error";
+} | null;
+type StatsData = {
+	source: string;
+	footprint: string;
+	elevationRange: string;
+	bounds: string;
+} | null;
+type NamedPlaceLegendEntry = {
+	category: string;
+	color: string;
+	label: string;
+	count: number;
+};
+
+const statusMsg = signal("Loading terrain assets...");
+const statusError = signal(false);
+const controlsVisible = signal(false);
+const statsData = signal<StatsData>(null);
+const orthophotoOptions = signal<OrthophotoOption[]>([]);
+const selectedPreset = signal<OrthophotoPresetId | "">("");
+const presetSelectDisabled = signal(true);
+const orthophotoControlVisible = signal(false);
+const exaggerationDisplay = signal("1.0x");
+const exaggerationRange = signal("1.0");
+const trackFeedback = signal<TrackFeedback>(null);
+const trackItems = signal<TrackOverlay[]>([]);
+const namedPlaceToggleVisible = signal(false);
+const namedPlacesChecked = signal(true);
+const namedPlaceLegendVisible = signal(false);
+const namedPlaceLegend = signal<NamedPlaceLegendEntry[]>([]);
+const namedPlaceLegendCount = signal(0);
+
+// ─── Preact components ────────────────────────────────────────────────────────
+
+function TrackListItem({ overlay }: { overlay: TrackOverlay }) {
+	return (
+		<li class="track-item">
+			<div class="track-item-header">
+				<div class="track-name-wrap">
+					<span
+						class="track-swatch"
+						style={{ backgroundColor: overlay.color }}
+					/>
+					<strong class="track-name">{overlay.name}</strong>
+				</div>
+				<div class="track-actions">
+					<button
+						type="button"
+						class="track-button"
+						onClick={() => handleTrackToggle(overlay)}
+					>
+						{overlay.visible ? "Hide" : "Show"}
+					</button>
+					<button
+						type="button"
+						class="track-button"
+						onClick={() => handleTrackZoom(overlay)}
+					>
+						Zoom to track
+					</button>
+					<button
+						type="button"
+						class="track-button track-button-danger"
+						onClick={() => handleTrackRemove(overlay)}
+					>
+						Remove
+					</button>
+				</div>
+			</div>
+			<p class="track-meta">
+				{formatCount(overlay.segmentCount, "segment")} ·{" "}
+				{formatCount(overlay.pointCount, "point")}
+			</p>
+			{overlay.skippedPointCount > 0 && (
+				<p class="track-warning">
+					Skipped {formatCount(overlay.skippedPointCount, "point")} outside the
+					DEM.
+				</p>
+			)}
+		</li>
+	);
 }
 
-app.innerHTML = `
-  <div class="layout">
-    <section class="viewer-shell">
-      <canvas class="viewer" aria-label="3D terrain viewer"></canvas>
-      <div class="viewer-overlay"></div>
-      <div class="viewer-hint">
-        <strong>Keyboard</strong>
-        <span>WASD or arrows to move, Q/E or PgUp/PgDn for altitude, Shift to accelerate.</span>
-      </div>
-    </section>
-    <aside class="panel">
-      <p class="eyebrow">Pyrenees DEM + PNOA</p>
-      <h1>Terrain Viewer</h1>
-      <p class="lede">
-        Preprocessed DEM heights and PNOA orthophoto imagery are draped into lightweight browser assets for fast interactive exploration.
-      </p>
+function App() {
+	const feedback = trackFeedback.value;
+	const tracks = trackItems.value;
+	const legend = namedPlaceLegend.value;
+	const stats = statsData.value;
 
-      <p class="status" data-status>Loading terrain assets...</p>
+	return (
+		<div class="layout">
+			<section class="viewer-shell">
+				<canvas class="viewer" aria-label="3D terrain viewer" />
+				<div class="viewer-overlay" />
+				<div class="viewer-hint">
+					<strong>Keyboard</strong>
+					<span>
+						WASD or arrows to move, Q/E or PgUp/PgDn for altitude, Shift to
+						accelerate.
+					</span>
+				</div>
+			</section>
+			<aside class="panel">
+				<p class="eyebrow">Pyrenees DEM + PNOA</p>
+				<h1>Terrain Viewer</h1>
+				<p class="lede">
+					Preprocessed DEM heights and PNOA orthophoto imagery are draped into
+					lightweight browser assets for fast interactive exploration.
+				</p>
 
-      <div class="controls" data-controls hidden>
-        <label class="control" data-orthophoto-control>
-          <span>Orthophoto resolution</span>
-          <select class="control-select" data-orthophoto-preset></select>
-        </label>
+				<p class={statusError.value ? "status status-error" : "status"}>
+					{statusMsg.value}
+				</p>
 
-        <label class="control">
-          <span>Vertical exaggeration</span>
-          <input type="range" min="0.8" max="2" step="0.1" data-exaggeration />
-          <strong data-exaggeration-value></strong>
-        </label>
+				<div class="controls" hidden={!controlsVisible.value}>
+					{orthophotoControlVisible.value && (
+						<label class="control">
+							<span>Orthophoto resolution</span>
+							<select
+								class="control-select"
+								disabled={presetSelectDisabled.value}
+								value={selectedPreset.value}
+								onChange={handlePresetChange}
+							>
+								{orthophotoOptions.value.map((opt) => (
+									<option key={opt.id} value={opt.id} disabled={opt.disabled}>
+										{opt.label}
+									</option>
+								))}
+							</select>
+						</label>
+					)}
 
-        <label class="control control-toggle" data-named-place-toggle hidden>
-          <span>Feature overlay</span>
-          <input type="checkbox" data-named-place-visible />
-        </label>
+					<label class="control">
+						<span>Vertical exaggeration</span>
+						<input
+							type="range"
+							min="0.8"
+							max="2"
+							step="0.1"
+							value={exaggerationRange.value}
+							onInput={handleExaggerationInput}
+						/>
+						<strong>{exaggerationDisplay.value}</strong>
+					</label>
 
-        <div class="upload-block">
-          <label class="upload-label" for="gpx-upload">Upload GPX tracks</label>
-          <input class="file-input" id="gpx-upload" type="file" accept=".gpx,application/gpx+xml" multiple data-gpx-input />
-          <p class="upload-copy">Tracks stay local to the browser and are clamped to the terrain surface.</p>
-        </div>
+					{namedPlaceToggleVisible.value && (
+						<label class="control control-toggle">
+							<span>Feature overlay</span>
+							<input
+								type="checkbox"
+								checked={namedPlacesChecked.value}
+								onChange={handleNamedPlaceToggle}
+							/>
+						</label>
+					)}
 
-        <p class="track-feedback" data-track-feedback hidden></p>
+					<div class="upload-block">
+						<label class="upload-label" for="gpx-upload">
+							Upload GPX tracks
+						</label>
+						<input
+							class="file-input"
+							id="gpx-upload"
+							type="file"
+							accept=".gpx,application/gpx+xml"
+							multiple
+							onChange={handleGpxChange}
+						/>
+						<p class="upload-copy">
+							Tracks stay local to the browser and are clamped to the terrain
+							surface.
+						</p>
+					</div>
 
-        <section class="track-section">
-          <div class="track-heading">
-            <span>Track overlays</span>
-            <strong data-track-count>0</strong>
-          </div>
-          <p class="track-empty" data-track-empty>No GPX tracks uploaded yet.</p>
-          <ul class="track-list" data-track-list></ul>
-        </section>
+					{feedback && (
+						<p class={`track-feedback track-feedback-${feedback.tone}`}>
+							{feedback.message}
+						</p>
+					)}
 
-        <section class="track-section" data-named-place-legend hidden>
-          <div class="track-heading">
-            <span>Natural features</span>
-            <strong data-named-place-count>0</strong>
-          </div>
-          <ul class="track-list named-place-legend" data-named-place-list></ul>
-        </section>
+					<section class="track-section">
+						<div class="track-heading">
+							<span>Track overlays</span>
+							<strong>{tracks.length}</strong>
+						</div>
+						{tracks.length === 0 ? (
+							<p class="track-empty">No GPX tracks uploaded yet.</p>
+						) : (
+							<ul class="track-list">
+								{tracks.map((overlay) => (
+									<TrackListItem key={overlay.id} overlay={overlay} />
+								))}
+							</ul>
+						)}
+					</section>
 
-        <button class="reset-button" type="button" data-reset-camera>Reset camera</button>
-      </div>
+					{namedPlaceLegendVisible.value && legend.length > 0 && (
+						<section class="track-section">
+							<div class="track-heading">
+								<span>Natural features</span>
+								<strong>{namedPlaceLegendCount.value}</strong>
+							</div>
+							<ul class="track-list named-place-legend">
+								{legend.map((entry) => (
+									<li
+										key={entry.category}
+										class="track-item named-place-legend-item"
+										data-category={entry.category}
+									>
+										<div class="track-name-wrap">
+											<span
+												class="track-swatch"
+												style={{ backgroundColor: entry.color }}
+											/>
+											<strong class="track-name">{entry.label}</strong>
+										</div>
+										<p class="track-meta">{entry.count} visible labels</p>
+									</li>
+								))}
+							</ul>
+						</section>
+					)}
 
-      <dl class="stats" data-stats hidden>
-        <div>
-          <dt>Source</dt>
-          <dd data-source></dd>
-        </div>
-        <div>
-          <dt>Footprint</dt>
-          <dd data-footprint></dd>
-        </div>
-        <div>
-          <dt>Elevation</dt>
-          <dd data-elevation-range></dd>
-        </div>
-        <div>
-          <dt>Bounds</dt>
-          <dd data-bounds></dd>
-        </div>
-      </dl>
-    </aside>
-  </div>
-`;
+					<button
+						class="reset-button"
+						type="button"
+						onClick={handleResetCamera}
+					>
+						Reset camera
+					</button>
+				</div>
 
-const canvas = app.querySelector<HTMLCanvasElement>("canvas.viewer");
-const viewerOverlay = app.querySelector<HTMLElement>(".viewer-overlay");
-const statusNode = app.querySelector<HTMLElement>("[data-status]");
-const controlsNode = app.querySelector<HTMLElement>("[data-controls]");
-const statsNode = app.querySelector<HTMLElement>("[data-stats]");
-const orthophotoControlNode = app.querySelector<HTMLElement>(
-	"[data-orthophoto-control]",
-);
-const orthophotoPresetSelect = app.querySelector<HTMLSelectElement>(
-	"[data-orthophoto-preset]",
-);
-const exaggerationInput = app.querySelector<HTMLInputElement>(
-	"[data-exaggeration]",
-);
-const exaggerationValue = app.querySelector<HTMLElement>(
-	"[data-exaggeration-value]",
-);
-const namedPlaceToggleNode = app.querySelector<HTMLElement>(
-	"[data-named-place-toggle]",
-);
-const namedPlaceVisibleInput = app.querySelector<HTMLInputElement>(
-	"[data-named-place-visible]",
-);
-const resetButton = app.querySelector<HTMLButtonElement>("[data-reset-camera]");
-const gpxInput = app.querySelector<HTMLInputElement>("[data-gpx-input]");
-const trackFeedbackNode = app.querySelector<HTMLElement>(
-	"[data-track-feedback]",
-);
-const trackCountNode = app.querySelector<HTMLElement>("[data-track-count]");
-const trackEmptyNode = app.querySelector<HTMLElement>("[data-track-empty]");
-const trackListNode = app.querySelector<HTMLUListElement>("[data-track-list]");
-const namedPlaceLegendNode = app.querySelector<HTMLElement>(
-	"[data-named-place-legend]",
-);
-const namedPlaceCountNode = app.querySelector<HTMLElement>(
-	"[data-named-place-count]",
-);
-const namedPlaceListNode = app.querySelector<HTMLUListElement>(
-	"[data-named-place-list]",
-);
-const sourceNode = app.querySelector<HTMLElement>("[data-source]");
-const footprintNode = app.querySelector<HTMLElement>("[data-footprint]");
-const elevationRangeNode = app.querySelector<HTMLElement>(
-	"[data-elevation-range]",
-);
-const boundsNode = app.querySelector<HTMLElement>("[data-bounds]");
-
-if (
-	!canvas ||
-	!viewerOverlay ||
-	!statusNode ||
-	!controlsNode ||
-	!statsNode ||
-	!orthophotoControlNode ||
-	!orthophotoPresetSelect ||
-	!exaggerationInput ||
-	!exaggerationValue ||
-	!namedPlaceToggleNode ||
-	!namedPlaceVisibleInput ||
-	!resetButton ||
-	!gpxInput ||
-	!trackFeedbackNode ||
-	!trackCountNode ||
-	!trackEmptyNode ||
-	!trackListNode ||
-	!namedPlaceLegendNode ||
-	!namedPlaceCountNode ||
-	!namedPlaceListNode ||
-	!sourceNode ||
-	!footprintNode ||
-	!elevationRangeNode ||
-	!boundsNode
-) {
-	throw new Error("The terrain viewer UI failed to initialize.");
+				{stats && (
+					<dl class="stats">
+						<div>
+							<dt>Source</dt>
+							<dd>{stats.source}</dd>
+						</div>
+						<div>
+							<dt>Footprint</dt>
+							<dd>{stats.footprint}</dd>
+						</div>
+						<div>
+							<dt>Elevation</dt>
+							<dd>{stats.elevationRange}</dd>
+						</div>
+						<div>
+							<dt>Bounds</dt>
+							<dd>{stats.bounds}</dd>
+						</div>
+					</dl>
+				)}
+			</aside>
+		</div>
+	);
 }
 
-const renderer = new THREE.WebGLRenderer({
-	canvas,
-	antialias: true,
-	alpha: true,
-});
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// ─── Three.js module-level state ──────────────────────────────────────────────
 
-const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0xd8e2da, 12000, 40000);
-
-const camera = new THREE.PerspectiveCamera(45, 1, 10, 100000);
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.05;
-controls.maxPolarAngle = Math.PI * 0.49;
-controls.minDistance = 400;
-
-scene.add(new THREE.HemisphereLight(0xfaf3e1, 0x344533, 1.4));
-
-const keyLight = new THREE.DirectionalLight(0xfff1d6, 1.8);
-keyLight.position.set(6000, 9000, 5000);
-scene.add(keyLight);
-
-const rimLight = new THREE.DirectionalLight(0xb8d4ff, 0.35);
-rimLight.position.set(-4000, 2500, -4500);
-scene.add(rimLight);
+let canvas!: HTMLCanvasElement;
+let viewerOverlay!: HTMLElement;
+let renderer!: THREE.WebGLRenderer;
+let scene!: THREE.Scene;
+let camera!: THREE.PerspectiveCamera;
+let controls!: OrbitControls;
 
 const trackOverlays: TrackOverlay[] = [];
 const pressedKeys = new Set<string>();
@@ -242,9 +328,88 @@ let animationHandle = 0;
 let trackColorCursor = 0;
 let orthophotoSwitchInFlight = false;
 
+// ─── UI callbacks (used in components) ────────────────────────────────────────
+
+async function handlePresetChange(event: Event) {
+	if (!terrainRuntime) return;
+	const select = event.target as HTMLSelectElement;
+	const nextPreset = select.value;
+	if (!isValidPresetId(terrainRuntime.metadata, nextPreset)) {
+		selectedPreset.value = terrainRuntime.currentOrthophotoPreset;
+		return;
+	}
+	await applyOrthophotoPreset(nextPreset);
+}
+
+function handleExaggerationInput(event: Event) {
+	if (!terrainRuntime) return;
+	const input = event.target as HTMLInputElement;
+	const exaggeration = Number.parseFloat(input.value);
+	terrainRuntime.currentExaggeration = exaggeration;
+	applyVerticalExaggeration(
+		terrainRuntime.geometry,
+		terrainRuntime.heights,
+		exaggeration,
+	);
+	syncTrackOverlayGeometries(exaggeration);
+	if (terrainRuntime.namedPlaceOverlay && terrainRuntime.namedPlacesVisible) {
+		updateNamedPlaceOverlay(
+			terrainRuntime.namedPlaceOverlay,
+			exaggeration,
+			camera,
+			canvas,
+		);
+	}
+	exaggerationRange.value = input.value;
+	exaggerationDisplay.value = `${exaggeration.toFixed(1)}x`;
+}
+
+async function handleGpxChange(event: Event) {
+	await handleTrackUpload((event.target as HTMLInputElement).files);
+	(event.target as HTMLInputElement).value = "";
+}
+
+function handleNamedPlaceToggle(event: Event) {
+	setNamedPlacesVisible((event.target as HTMLInputElement).checked);
+}
+
+function handleResetCamera() {
+	if (!terrainRuntime) return;
+	resetCamera(terrainRuntime.metadata, terrainRuntime.currentExaggeration);
+}
+
+function handleTrackToggle(overlay: TrackOverlay) {
+	overlay.visible = !overlay.visible;
+	overlay.object.visible = overlay.visible;
+	trackItems.value = [...trackOverlays];
+}
+
+function handleTrackZoom(overlay: TrackOverlay) {
+	focusTrackOverlay(overlay);
+}
+
+function handleTrackRemove(overlay: TrackOverlay) {
+	const index = trackOverlays.findIndex((entry) => entry.id === overlay.id);
+	if (index >= 0) {
+		disposeTrackOverlay(overlay);
+		trackOverlays.splice(index, 1);
+		trackItems.value = [...trackOverlays];
+		setTrackFeedback(`Removed ${overlay.name}.`, "info");
+	}
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 function setStatus(message: string, isError = false) {
-	statusNode.textContent = message;
-	statusNode.classList.toggle("status-error", isError);
+	statusMsg.value = message;
+	statusError.value = isError;
+}
+
+function setTrackFeedback(
+	message: string | null,
+	tone: "info" | "success" | "warning" | "error" = "info",
+) {
+	trackFeedback.value = message ? { message, tone } : null;
 }
 
 function formatPresetLabel(presetId: OrthophotoPresetId) {
@@ -263,46 +428,15 @@ function formatOrthophotoSourceLabel(
 }
 
 function isEditableTarget(target: EventTarget | null) {
-	if (!(target instanceof HTMLElement)) {
-		return false;
-	}
-
-	if (target.isContentEditable) {
-		return true;
-	}
-
+	if (!(target instanceof HTMLElement)) return false;
+	if (target.isContentEditable) return true;
 	return Boolean(target.closest("input, textarea, select, button, label"));
 }
 
-function setTrackFeedback(
-	message: string | null,
-	tone: "info" | "success" | "warning" | "error" = "info",
-) {
-	if (!message) {
-		trackFeedbackNode.hidden = true;
-		trackFeedbackNode.textContent = "";
-		trackFeedbackNode.className = "track-feedback";
-		return;
-	}
-
-	trackFeedbackNode.hidden = false;
-	trackFeedbackNode.textContent = message;
-	trackFeedbackNode.className = `track-feedback track-feedback-${tone}`;
-}
-
 function nextTrackColor() {
-	const color = TRACK_COLORS[trackColorCursor % TRACK_COLORS.length];
+	const color = TRACK_COLORS[trackColorCursor % TRACK_COLORS.length]!;
 	trackColorCursor += 1;
 	return color;
-}
-
-function getCurrentExaggeration() {
-	if (!terrainRuntime) {
-		return 1;
-	}
-
-	const parsed = Number.parseFloat(exaggerationInput.value);
-	return Number.isFinite(parsed) ? parsed : terrainRuntime.currentExaggeration;
 }
 
 function isValidPresetId(
@@ -315,13 +449,10 @@ function isValidPresetId(
 function getStoredPreset(metadata: TerrainMetadata) {
 	try {
 		const stored = window.localStorage.getItem(ORTHOPHOTO_PRESET_STORAGE_KEY);
-		if (stored && isValidPresetId(metadata, stored)) {
-			return stored;
-		}
+		if (stored && isValidPresetId(metadata, stored)) return stored;
 	} catch {
 		// Ignore storage failures in restricted browsers.
 	}
-
 	return metadata.orthophoto.defaultPreset;
 }
 
@@ -338,16 +469,11 @@ function getStoredNamedPlacesVisible() {
 		const stored = window.localStorage.getItem(
 			NAMED_PLACES_VISIBLE_STORAGE_KEY,
 		);
-		if (stored === "true") {
-			return true;
-		}
-		if (stored === "false") {
-			return false;
-		}
+		if (stored === "true") return true;
+		if (stored === "false") return false;
 	} catch {
 		// Ignore storage failures in restricted browsers.
 	}
-
 	return true;
 }
 
@@ -364,19 +490,31 @@ function persistNamedPlacesVisible(value: boolean) {
 
 function populateOrthophotoPresetControl(
 	metadata: TerrainMetadata,
-	selectedPreset: OrthophotoPresetId,
+	currentPreset: OrthophotoPresetId,
 ) {
-	orthophotoPresetSelect.replaceChildren(
-		...ORTHOPHOTO_PRESET_ORDER.map((presetId) => {
-			const option = document.createElement("option");
-			option.value = presetId;
-			option.textContent = formatPresetLabel(presetId);
-			option.disabled = !(presetId in metadata.orthophoto.presets);
-			return option;
-		}),
-	);
-	orthophotoPresetSelect.value = selectedPreset;
-	orthophotoControlNode.hidden = false;
+	orthophotoOptions.value = ORTHOPHOTO_PRESET_ORDER.map((presetId) => ({
+		id: presetId,
+		label: formatPresetLabel(presetId),
+		disabled: !(presetId in metadata.orthophoto.presets),
+	}));
+	selectedPreset.value = currentPreset;
+	orthophotoControlVisible.value = true;
+}
+
+function updateStats(
+	metadata: TerrainMetadata,
+	currentPreset: OrthophotoPresetId,
+) {
+	const demSource =
+		metadata.sourceFiles.length === 1
+			? metadata.sourceFiles[0]
+			: `${metadata.sourceFiles.length} DEM tiles`;
+	statsData.value = {
+		source: `${demSource} + ${formatOrthophotoSourceLabel(metadata, currentPreset)} (${formatPresetLabel(currentPreset)})`,
+		footprint: `${formatDistance(metadata.sizeMeters.width)} x ${formatDistance(metadata.sizeMeters.height)}`,
+		elevationRange: `${metadata.elevationRange.min.toFixed(0)} m to ${metadata.elevationRange.max.toFixed(0)} m`,
+		bounds: formatBounds(metadata),
+	};
 }
 
 async function loadOrthophotoPresetPixels(
@@ -417,11 +555,7 @@ async function loadOrthophotoPresetPixels(
 function updateTrackMaterialsResolution() {
 	const width = canvas.clientWidth;
 	const height = canvas.clientHeight;
-
-	if (!width || !height) {
-		return;
-	}
-
+	if (!width || !height) return;
 	for (const overlay of trackOverlays) {
 		for (const line of overlay.lines) {
 			line.material.resolution.set(width, height);
@@ -435,7 +569,7 @@ function updateTrackOverlayGeometry(
 ) {
 	overlay.lines.forEach((line, index) => {
 		line.geometry.setPositions(
-			buildLinePositions(overlay.segments[index], exaggeration),
+			buildLinePositions(overlay.segments[index]!, exaggeration),
 		);
 		line.computeLineDistances();
 	});
@@ -457,14 +591,10 @@ function disposeTrackOverlay(overlay: TrackOverlay) {
 }
 
 function focusBox(bounds: THREE.Box3) {
-	if (bounds.isEmpty()) {
-		return;
-	}
-
+	if (bounds.isEmpty()) return;
 	const center = bounds.getCenter(new THREE.Vector3());
 	const size = bounds.getSize(new THREE.Vector3());
 	const radius = Math.max(size.x, size.y * 2, size.z, 600);
-
 	controls.target.copy(center);
 	camera.position.set(
 		center.x,
@@ -481,122 +611,28 @@ function focusTrackOverlay(overlay: TrackOverlay) {
 	focusBox(overlay.bounds);
 }
 
-function buildTrackListItem(overlay: TrackOverlay) {
-	const item = document.createElement("li");
-	item.className = "track-item";
-	item.dataset.id = overlay.id;
-
-	const header = document.createElement("div");
-	header.className = "track-item-header";
-
-	const nameWrap = document.createElement("div");
-	nameWrap.className = "track-name-wrap";
-
-	const swatch = document.createElement("span");
-	swatch.className = "track-swatch";
-	swatch.style.backgroundColor = overlay.color;
-
-	const name = document.createElement("strong");
-	name.className = "track-name";
-	name.textContent = overlay.name;
-
-	nameWrap.append(swatch, name);
-
-	const meta = document.createElement("p");
-	meta.className = "track-meta";
-	meta.textContent = `${formatCount(overlay.segmentCount, "segment")} · ${formatCount(overlay.pointCount, "point")}`;
-
-	if (overlay.skippedPointCount > 0) {
-		const warning = document.createElement("p");
-		warning.className = "track-warning";
-		warning.textContent = `Skipped ${formatCount(overlay.skippedPointCount, "point")} outside the DEM.`;
-		item.append(header, meta, warning);
-	} else {
-		item.append(header, meta);
-	}
-
-	const actions = document.createElement("div");
-	actions.className = "track-actions";
-
-	const toggleButton = document.createElement("button");
-	toggleButton.type = "button";
-	toggleButton.className = "track-button";
-	toggleButton.dataset.action = "toggle";
-	toggleButton.textContent = overlay.visible ? "Hide" : "Show";
-
-	const zoomButton = document.createElement("button");
-	zoomButton.type = "button";
-	zoomButton.className = "track-button";
-	toggleButton.dataset.action = "toggle";
-	zoomButton.dataset.action = "zoom";
-	zoomButton.textContent = "Zoom to track";
-
-	const removeButton = document.createElement("button");
-	removeButton.type = "button";
-	removeButton.className = "track-button track-button-danger";
-	removeButton.dataset.action = "remove";
-	removeButton.textContent = "Remove";
-
-	actions.append(toggleButton, zoomButton, removeButton);
-	header.append(nameWrap, actions);
-
-	return item;
-}
-
-function renderTrackList() {
-	trackListNode.replaceChildren(
-		...trackOverlays.map((overlay) => buildTrackListItem(overlay)),
-	);
-	trackCountNode.textContent = String(trackOverlays.length);
-	trackEmptyNode.hidden = trackOverlays.length > 0;
-}
-
 function renderNamedPlaceLegend(metadata: TerrainMetadata) {
 	if (!metadata.namedPlaces) {
-		namedPlaceLegendNode.hidden = true;
-		namedPlaceListNode.replaceChildren();
-		namedPlaceCountNode.textContent = "0";
+		namedPlaceLegendVisible.value = false;
+		namedPlaceLegend.value = [];
+		namedPlaceLegendCount.value = 0;
 		return;
 	}
 
 	const categories = Object.entries(metadata.namedPlaces.categories).filter(
 		([, info]) => info.count > 0,
 	);
-	namedPlaceCountNode.textContent = String(metadata.namedPlaces.featureCount);
-	namedPlaceListNode.replaceChildren(
-		...categories.map(([category, info]) => {
-			const item = document.createElement("li");
-			item.className = "track-item named-place-legend-item";
-
-			const swatch = document.createElement("span");
-			swatch.className = "track-swatch";
-			swatch.style.backgroundColor = info.color;
-
-			const label = document.createElement("strong");
-			label.className = "track-name";
-			label.textContent = info.label;
-
-			const meta = document.createElement("p");
-			meta.className = "track-meta";
-			meta.textContent = `${info.count} visible labels`;
-
-			const row = document.createElement("div");
-			row.className = "track-name-wrap";
-			row.append(swatch, label);
-
-			item.append(row, meta);
-			item.dataset.category = category;
-			return item;
-		}),
-	);
-	namedPlaceLegendNode.hidden = categories.length === 0;
+	namedPlaceLegendCount.value = metadata.namedPlaces.featureCount;
+	namedPlaceLegend.value = categories.map(([category, info]) => ({
+		category,
+		color: info.color,
+		label: info.label,
+		count: info.count,
+	}));
 }
 
 function hideNamedPlaceLabels() {
-	if (!terrainRuntime?.namedPlaceOverlay) {
-		return;
-	}
-
+	if (!terrainRuntime?.namedPlaceOverlay) return;
 	for (const label of terrainRuntime.namedPlaceOverlay.labelElements) {
 		label.hidden = true;
 	}
@@ -604,17 +640,17 @@ function hideNamedPlaceLabels() {
 
 function setNamedPlacesVisible(visible: boolean, persist = true) {
 	if (!terrainRuntime?.namedPlaceOverlay) {
-		namedPlaceVisibleInput.checked = visible;
-		namedPlaceToggleNode.hidden = true;
-		namedPlaceLegendNode.hidden = true;
+		namedPlacesChecked.value = visible;
+		namedPlaceToggleVisible.value = false;
+		namedPlaceLegendVisible.value = false;
 		return;
 	}
 
 	terrainRuntime.namedPlacesVisible = visible;
 	terrainRuntime.namedPlaceOverlay.group.visible = visible;
-	namedPlaceVisibleInput.checked = visible;
-	namedPlaceToggleNode.hidden = false;
-	namedPlaceLegendNode.hidden = !visible;
+	namedPlacesChecked.value = visible;
+	namedPlaceToggleVisible.value = true;
+	namedPlaceLegendVisible.value = visible;
 	if (!visible) {
 		hideNamedPlaceLabels();
 	} else {
@@ -637,7 +673,6 @@ function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
 	);
 	const verticalRange =
 		(metadata.elevationRange.max - metadata.elevationRange.min) * exaggeration;
-
 	camera.position.set(0, maxSpan * 0.42 + verticalRange * 0.8, maxSpan * 0.82);
 	controls.target.set(0, verticalRange * 0.18, 0);
 	controls.maxDistance = maxSpan * 3.2;
@@ -648,9 +683,7 @@ function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
 }
 
 function updateKeyboardNavigation(deltaSeconds: number) {
-	if (!terrainRuntime || pressedKeys.size === 0) {
-		return;
-	}
+	if (!terrainRuntime || pressedKeys.size === 0) return;
 
 	keyboardForward.subVectors(controls.target, camera.position);
 	keyboardForward.y = 0;
@@ -658,37 +691,26 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 		camera.getWorldDirection(keyboardForward);
 		keyboardForward.y = 0;
 	}
-
-	if (keyboardForward.lengthSq() < 1e-6) {
-		return;
-	}
+	if (keyboardForward.lengthSq() < 1e-6) return;
 
 	keyboardForward.normalize();
 	keyboardRight.crossVectors(keyboardForward, camera.up).normalize();
 	keyboardOffset.set(0, 0, 0);
 
-	if (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp")) {
+	if (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp"))
 		keyboardOffset.add(keyboardForward);
-	}
-	if (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown")) {
+	if (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown"))
 		keyboardOffset.sub(keyboardForward);
-	}
-	if (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight")) {
+	if (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight"))
 		keyboardOffset.add(keyboardRight);
-	}
-	if (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft")) {
+	if (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft"))
 		keyboardOffset.sub(keyboardRight);
-	}
-	if (pressedKeys.has("KeyE") || pressedKeys.has("PageUp")) {
+	if (pressedKeys.has("KeyE") || pressedKeys.has("PageUp"))
 		keyboardOffset.y += 1;
-	}
-	if (pressedKeys.has("KeyQ") || pressedKeys.has("PageDown")) {
+	if (pressedKeys.has("KeyQ") || pressedKeys.has("PageDown"))
 		keyboardOffset.y -= 1;
-	}
 
-	if (keyboardOffset.lengthSq() === 0) {
-		return;
-	}
+	if (keyboardOffset.lengthSq() === 0) return;
 
 	const viewDistance = camera.position.distanceTo(controls.target);
 	const terrainSpan = Math.max(
@@ -712,47 +734,26 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 
 function resizeRenderer() {
 	const { clientWidth, clientHeight } = canvas;
-	if (!clientWidth || !clientHeight) {
-		return;
-	}
-
+	if (!clientWidth || !clientHeight) return;
 	renderer.setSize(clientWidth, clientHeight, false);
 	camera.aspect = clientWidth / clientHeight;
 	camera.updateProjectionMatrix();
 	updateTrackMaterialsResolution();
 }
 
-function updateStats(
-	metadata: TerrainMetadata,
-	currentPreset: OrthophotoPresetId,
-) {
-	const demSource =
-		metadata.sourceFiles.length === 1
-			? metadata.sourceFiles[0]
-			: `${metadata.sourceFiles.length} DEM tiles`;
-	sourceNode.textContent = `${demSource} + ${formatOrthophotoSourceLabel(metadata, currentPreset)} (${formatPresetLabel(currentPreset)})`;
-	footprintNode.textContent = `${formatDistance(metadata.sizeMeters.width)} x ${formatDistance(metadata.sizeMeters.height)}`;
-	elevationRangeNode.textContent = `${metadata.elevationRange.min.toFixed(0)} m to ${metadata.elevationRange.max.toFixed(0)} m`;
-	boundsNode.textContent = formatBounds(metadata);
-}
-
 async function applyOrthophotoPreset(
 	presetId: OrthophotoPresetId,
 	persistSelection = true,
 ) {
-	if (!terrainRuntime || orthophotoSwitchInFlight) {
-		return;
-	}
+	if (!terrainRuntime || orthophotoSwitchInFlight) return;
 
 	if (terrainRuntime.currentOrthophotoPreset === presetId) {
-		if (persistSelection) {
-			persistPresetSelection(presetId);
-		}
+		if (persistSelection) persistPresetSelection(presetId);
 		return;
 	}
 
 	orthophotoSwitchInFlight = true;
-	orthophotoPresetSelect.disabled = true;
+	presetSelectDisabled.value = true;
 
 	try {
 		const preset = terrainRuntime.metadata.orthophoto.presets[presetId];
@@ -775,16 +776,14 @@ async function applyOrthophotoPreset(
 		previousTexture?.dispose();
 
 		terrainRuntime.currentOrthophotoPreset = presetId;
-		orthophotoPresetSelect.value = presetId;
+		selectedPreset.value = presetId;
 		updateStats(terrainRuntime.metadata, presetId);
-		if (persistSelection) {
-			persistPresetSelection(presetId);
-		}
+		if (persistSelection) persistPresetSelection(presetId);
 		setStatus(
 			`Terrain ready. ${formatPresetLabel(presetId)} orthophoto loaded; upload a GPX file to overlay a track.`,
 		);
 	} catch (error) {
-		orthophotoPresetSelect.value = terrainRuntime.currentOrthophotoPreset;
+		selectedPreset.value = terrainRuntime.currentOrthophotoPreset;
 		setStatus(
 			error instanceof Error
 				? error.message
@@ -792,15 +791,13 @@ async function applyOrthophotoPreset(
 			true,
 		);
 	} finally {
-		orthophotoPresetSelect.disabled = false;
+		presetSelectDisabled.value = false;
 		orthophotoSwitchInFlight = false;
 	}
 }
 
 function createTrackOverlay(name: string, segments: TrackSegment[]) {
-	if (!terrainRuntime) {
-		throw new Error("Terrain is not ready yet.");
-	}
+	if (!terrainRuntime) throw new Error("Terrain is not ready yet.");
 
 	const projected = projectTrackSegments(segments, terrainRuntime);
 	if (projected.segments.length === 0) {
@@ -857,9 +854,7 @@ function createTrackOverlay(name: string, segments: TrackSegment[]) {
 }
 
 async function handleTrackUpload(files: FileList | null) {
-	if (!terrainRuntime || !files || files.length === 0) {
-		return;
-	}
+	if (!terrainRuntime || !files || files.length === 0) return;
 
 	const messages: string[] = [];
 	let latestOverlay: TrackOverlay | null = null;
@@ -884,7 +879,7 @@ async function handleTrackUpload(files: FileList | null) {
 		}
 	}
 
-	renderTrackList();
+	trackItems.value = [...trackOverlays];
 
 	if (latestOverlay) {
 		focusTrackOverlay(latestOverlay);
@@ -900,8 +895,6 @@ async function handleTrackUpload(files: FileList | null) {
 	} else {
 		setTrackFeedback(`Loaded ${formatCount(loadedCount, "track")}.`, "success");
 	}
-
-	gpxInput.value = "";
 }
 
 async function loadTerrain() {
@@ -920,9 +913,9 @@ async function loadTerrain() {
 		);
 	}
 	const metadata = (await metadataResponse.json()) as TerrainMetadata;
-	const selectedPreset = getStoredPreset(metadata);
-	populateOrthophotoPresetControl(metadata, selectedPreset);
-	orthophotoPresetSelect.disabled = true;
+	const currentPreset = getStoredPreset(metadata);
+	populateOrthophotoPresetControl(metadata, currentPreset);
+	presetSelectDisabled.value = true;
 
 	setStatus("Loading terrain heightmap...");
 	const heightAssetUrl = resolveAssetUrl(
@@ -947,6 +940,7 @@ async function loadTerrain() {
 					"Terrain height asset",
 				)
 			: compressedHeightBuffer;
+
 	if (rawHeightBuffer.byteLength !== expectedByteLength) {
 		throw new Error(
 			`Terrain height asset has ${rawHeightBuffer.byteLength} bytes, expected ${expectedByteLength}.`,
@@ -955,7 +949,7 @@ async function loadTerrain() {
 
 	const orthophotoPixels = await loadOrthophotoPresetPixels(
 		metadata,
-		selectedPreset,
+		currentPreset,
 		metadataResponse.url,
 	);
 	const namedPlaceFeatures = metadata.namedPlaces
@@ -969,7 +963,7 @@ async function loadTerrain() {
 		metadata,
 		heights,
 		orthophotoPixels,
-		metadata.orthophoto.presets[selectedPreset],
+		metadata.orthophoto.presets[currentPreset],
 	);
 	const geometry = new THREE.PlaneGeometry(
 		metadata.sizeMeters.width,
@@ -1010,28 +1004,28 @@ async function loadTerrain() {
 		metadata,
 		assetsBaseUrl: metadataResponse.url,
 		currentExaggeration: metadata.defaultVerticalExaggeration,
-		currentOrthophotoPreset: selectedPreset,
+		currentOrthophotoPreset: currentPreset,
 		namedPlaceOverlay,
 		namedPlacesVisible: namedPlaceOverlay
 			? getStoredNamedPlacesVisible()
 			: false,
 	};
 
-	exaggerationInput.value = metadata.defaultVerticalExaggeration.toFixed(1);
-	exaggerationValue.textContent = `${metadata.defaultVerticalExaggeration.toFixed(1)}x`;
-	updateStats(metadata, selectedPreset);
+	exaggerationRange.value = metadata.defaultVerticalExaggeration.toFixed(1);
+	exaggerationDisplay.value = `${metadata.defaultVerticalExaggeration.toFixed(1)}x`;
+
+	updateStats(metadata, currentPreset);
 	renderNamedPlaceLegend(metadata);
-	persistPresetSelection(selectedPreset);
+	persistPresetSelection(currentPreset);
 	resetCamera(metadata, metadata.defaultVerticalExaggeration);
 	resizeRenderer();
 	setNamedPlacesVisible(terrainRuntime.namedPlacesVisible, false);
 
-	controlsNode.hidden = false;
-	statsNode.hidden = false;
-	orthophotoPresetSelect.disabled = false;
-	renderTrackList();
+	controlsVisible.value = true;
+	presetSelectDisabled.value = false;
+	trackItems.value = [...trackOverlays];
 	setStatus(
-		`Terrain ready. ${formatPresetLabel(selectedPreset)} orthophoto and natural-feature overlay loaded; upload a GPX file to overlay a track.`,
+		`Terrain ready. ${formatPresetLabel(currentPreset)} orthophoto and natural-feature overlay loaded; upload a GPX file to overlay a track.`,
 	);
 }
 
@@ -1051,124 +1045,53 @@ function animate() {
 	renderer.render(scene, camera);
 }
 
-orthophotoPresetSelect.addEventListener("change", async () => {
-	if (!terrainRuntime) {
-		return;
-	}
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
 
-	const nextPreset = orthophotoPresetSelect.value;
-	if (!isValidPresetId(terrainRuntime.metadata, nextPreset)) {
-		orthophotoPresetSelect.value = terrainRuntime.currentOrthophotoPreset;
-		return;
-	}
+const app = document.querySelector<HTMLDivElement>("#app");
+if (!app) {
+	throw new Error("Application root was not found.");
+}
 
-	await applyOrthophotoPreset(nextPreset);
-});
+render(<App />, app);
 
-exaggerationInput.addEventListener("input", () => {
-	if (!terrainRuntime) {
-		return;
-	}
+canvas = app.querySelector<HTMLCanvasElement>("canvas.viewer")!;
+viewerOverlay = app.querySelector<HTMLElement>(".viewer-overlay")!;
 
-	const exaggeration = Number.parseFloat(exaggerationInput.value);
-	terrainRuntime.currentExaggeration = exaggeration;
-	applyVerticalExaggeration(
-		terrainRuntime.geometry,
-		terrainRuntime.heights,
-		exaggeration,
-	);
-	syncTrackOverlayGeometries(exaggeration);
-	if (terrainRuntime.namedPlaceOverlay && terrainRuntime.namedPlacesVisible) {
-		updateNamedPlaceOverlay(
-			terrainRuntime.namedPlaceOverlay,
-			exaggeration,
-			camera,
-			canvas,
-		);
-	}
-	exaggerationValue.textContent = `${exaggeration.toFixed(1)}x`;
-});
+renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-gpxInput.addEventListener("change", async () => {
-	await handleTrackUpload(gpxInput.files);
-});
+scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xd8e2da, 12000, 40000);
 
-namedPlaceVisibleInput.addEventListener("change", () => {
-	setNamedPlacesVisible(namedPlaceVisibleInput.checked);
-});
+camera = new THREE.PerspectiveCamera(45, 1, 10, 100000);
+controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.minDistance = 400;
 
-trackListNode.addEventListener("click", (event) => {
-	const target = event.target;
-	if (!(target instanceof HTMLElement)) {
-		return;
-	}
+scene.add(new THREE.HemisphereLight(0xfaf3e1, 0x344533, 1.4));
 
-	const action = target.dataset.action;
-	if (!action) {
-		return;
-	}
+const keyLight = new THREE.DirectionalLight(0xfff1d6, 1.8);
+keyLight.position.set(6000, 9000, 5000);
+scene.add(keyLight);
 
-	const item = target.closest<HTMLElement>("[data-id]");
-	if (!item) {
-		return;
-	}
-
-	const overlay = trackOverlays.find((entry) => entry.id === item.dataset.id);
-	if (!overlay) {
-		return;
-	}
-
-	if (action === "toggle") {
-		overlay.visible = !overlay.visible;
-		overlay.object.visible = overlay.visible;
-		renderTrackList();
-		return;
-	}
-
-	if (action === "zoom") {
-		focusTrackOverlay(overlay);
-		return;
-	}
-
-	if (action === "remove") {
-		const index = trackOverlays.findIndex((entry) => entry.id === overlay.id);
-		if (index >= 0) {
-			disposeTrackOverlay(overlay);
-			trackOverlays.splice(index, 1);
-			renderTrackList();
-			setTrackFeedback(`Removed ${overlay.name}.`, "info");
-		}
-	}
-});
-
-resetButton.addEventListener("click", () => {
-	if (!terrainRuntime) {
-		return;
-	}
-
-	resetCamera(terrainRuntime.metadata, getCurrentExaggeration());
-});
+const rimLight = new THREE.DirectionalLight(0xb8d4ff, 0.35);
+rimLight.position.set(-4000, 2500, -4500);
+scene.add(rimLight);
 
 const resizeObserver = new ResizeObserver(() => resizeRenderer());
 resizeObserver.observe(canvas);
 window.addEventListener("resize", resizeRenderer);
 window.addEventListener("keydown", (event) => {
-	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) {
-		return;
-	}
-
-	if (isEditableTarget(event.target)) {
-		return;
-	}
-
+	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) return;
+	if (isEditableTarget(event.target)) return;
 	pressedKeys.add(event.code);
 	event.preventDefault();
 });
 window.addEventListener("keyup", (event) => {
-	if (!KEYBOARD_MOVE_CODES.has(event.code)) {
-		return;
-	}
-
+	if (!KEYBOARD_MOVE_CODES.has(event.code)) return;
 	pressedKeys.delete(event.code);
 });
 window.addEventListener("blur", () => {
@@ -1195,6 +1118,6 @@ window.addEventListener("beforeunload", () => {
 	if (terrainRuntime?.namedPlaceOverlay) {
 		disposeNamedPlaceOverlay(terrainRuntime.namedPlaceOverlay);
 	}
-	const material = terrainRuntime?.mesh.material;
-	material?.map?.dispose();
+	const mat = terrainRuntime?.mesh.material;
+	mat?.map?.dispose();
 });

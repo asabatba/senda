@@ -1,5 +1,7 @@
 import "./trip-export.css";
 
+import { signal } from "@preact/signals";
+import { render } from "preact";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
@@ -11,6 +13,8 @@ import { KEYBOARD_MOVE_CODES, TRACK_SURFACE_OFFSET } from "./terrain/constants";
 import { applyVerticalExaggeration, buildHeightArray } from "./terrain/heights";
 import { buildSurfaceTexture } from "./terrain/texture";
 import type { OrthophotoPresetId, TerrainMetadata } from "./terrain/types";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type TripTrackPoint = {
 	x: number;
@@ -84,102 +88,121 @@ type TrackTimelineLabel = {
 	element: HTMLDivElement;
 };
 
-const app = document.querySelector<HTMLDivElement>("#app");
-if (!app) {
-	throw new Error("Application root was not found.");
+// ─── Signals ──────────────────────────────────────────────────────────────────
+
+const statusMsg = signal("Loading trip bundle...");
+const statusError = signal(false);
+const tripStats = signal<TripBundle["stats"] | null>(null);
+const tripClusters = signal<TripCluster[]>([]);
+const tripPhotoAnchors = signal<TripPhotoAnchor[]>([]);
+const resetVisible = signal(false);
+
+// ─── Preact components ────────────────────────────────────────────────────────
+
+function ClusterItem({ cluster }: { cluster: TripCluster }) {
+	const anchors = tripPhotoAnchors.value;
+	const members = anchors.filter((a) => a.clusterId === cluster.id);
+	return (
+		<li class="trip-cluster-item" onClick={() => zoomToCluster(cluster)}>
+			<strong>
+				{members.length === 1
+					? members[0]?.sourceLabel
+					: `${members.length} photos`}
+			</strong>
+			<p>
+				{members
+					.slice(0, 3)
+					.map((m) => m.description ?? m.sourceLabel)
+					.join(" · ")}
+			</p>
+		</li>
+	);
 }
 
-app.innerHTML = `
-  <div class="trip-layout">
-    <section class="trip-viewer-shell">
-      <canvas class="trip-viewer" aria-label="Trip scene export" tabindex="0"></canvas>
-      <div class="trip-viewer-overlay"></div>
-      <div class="trip-viewer-hint">
-        <strong>Trip Scene</strong>
-        <span>Mouse or touch to inspect the route. Focus the scene then use WASD/arrows to pan, Q/E for altitude, Shift to accelerate, +/- to zoom, R to reset.</span>
-      </div>
-    </section>
-    <aside class="trip-panel">
-      <p class="trip-eyebrow">Standalone Export</p>
-      <h1 class="trip-title">Trip Scene</h1>
-      <p class="trip-lede">Terrain, orthophoto, route line, and photo clusters are prepacked into this self-contained scene.</p>
-      <p class="trip-status" data-status>Loading trip bundle...</p>
-      <dl class="trip-stats" data-stats hidden>
-        <div><dt>Tracks</dt><dd data-track-count></dd></div>
-        <div><dt>Photos</dt><dd data-photo-count></dd></div>
-        <div><dt>Clusters</dt><dd data-cluster-count></dd></div>
-      </dl>
-      <section class="trip-cluster-section" data-cluster-section hidden>
-        <div class="trip-cluster-header">
-          <span>Photo Clusters</span>
-          <strong data-cluster-badge></strong>
-        </div>
-        <ul class="trip-cluster-list" data-cluster-list></ul>
-      </section>
-      <button class="trip-reset-button" type="button" data-reset-camera hidden>Reset camera</button>
-    </aside>
-  </div>
-`;
-
-const canvas = app.querySelector<HTMLCanvasElement>(".trip-viewer");
-const viewerOverlay = app.querySelector<HTMLElement>(".trip-viewer-overlay");
-const statusNode = app.querySelector<HTMLElement>("[data-status]");
-const statsNode = app.querySelector<HTMLElement>("[data-stats]");
-const trackCountNode = app.querySelector<HTMLElement>("[data-track-count]");
-const photoCountNode = app.querySelector<HTMLElement>("[data-photo-count]");
-const clusterCountNode = app.querySelector<HTMLElement>("[data-cluster-count]");
-const clusterSectionNode = app.querySelector<HTMLElement>(
-	"[data-cluster-section]",
-);
-const clusterBadgeNode = app.querySelector<HTMLElement>("[data-cluster-badge]");
-const clusterListNode = app.querySelector<HTMLUListElement>(
-	"[data-cluster-list]",
-);
-const resetButton = app.querySelector<HTMLButtonElement>("[data-reset-camera]");
-
-if (
-	!canvas ||
-	!viewerOverlay ||
-	!statusNode ||
-	!statsNode ||
-	!trackCountNode ||
-	!photoCountNode ||
-	!clusterCountNode ||
-	!clusterSectionNode ||
-	!clusterBadgeNode ||
-	!clusterListNode ||
-	!resetButton
-) {
-	throw new Error("Trip export UI failed to initialize.");
+function App() {
+	return (
+		<div class="trip-layout">
+			<section class="trip-viewer-shell">
+				<canvas
+					class="trip-viewer"
+					aria-label="Trip scene export"
+					tabIndex={0}
+				/>
+				<div class="trip-viewer-overlay" />
+				<div class="trip-viewer-hint">
+					<strong>Trip Scene</strong>
+					<span>
+						Mouse or touch to inspect the route. Focus the scene then use
+						WASD/arrows to pan, Q/E for altitude, Shift to accelerate, +/- to
+						zoom, R to reset.
+					</span>
+				</div>
+			</section>
+			<aside class="trip-panel">
+				<p class="trip-eyebrow">Standalone Export</p>
+				<h1 class="trip-title">Trip Scene</h1>
+				<p class="trip-lede">
+					Terrain, orthophoto, route line, and photo clusters are prepacked into
+					this self-contained scene.
+				</p>
+				<p
+					class={
+						statusError.value ? "trip-status trip-status-error" : "trip-status"
+					}
+				>
+					{statusMsg.value}
+				</p>
+				{tripStats.value && (
+					<dl class="trip-stats">
+						<div>
+							<dt>Tracks</dt>
+							<dd>{tripStats.value.trackCount}</dd>
+						</div>
+						<div>
+							<dt>Photos</dt>
+							<dd>{tripStats.value.imageCount}</dd>
+						</div>
+						<div>
+							<dt>Clusters</dt>
+							<dd>{tripStats.value.clusterCount}</dd>
+						</div>
+					</dl>
+				)}
+				{tripClusters.value.length > 0 && (
+					<section class="trip-cluster-section">
+						<div class="trip-cluster-header">
+							<span>Photo Clusters</span>
+							<strong>{tripClusters.value.length}</strong>
+						</div>
+						<ul class="trip-cluster-list">
+							{tripClusters.value.map((cluster) => (
+								<ClusterItem key={cluster.id} cluster={cluster} />
+							))}
+						</ul>
+					</section>
+				)}
+				{resetVisible.value && (
+					<button
+						class="trip-reset-button"
+						type="button"
+						onClick={handleResetCamera}
+					>
+						Reset camera
+					</button>
+				)}
+			</aside>
+		</div>
+	);
 }
 
-const renderer = new THREE.WebGLRenderer({
-	canvas,
-	antialias: true,
-	alpha: true,
-});
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// ─── Three.js module-level state ──────────────────────────────────────────────
 
-const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0xcbd7e2, 7000, 34000);
-
-const camera = new THREE.PerspectiveCamera(44, 1, 10, 120000);
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.06;
-controls.maxPolarAngle = Math.PI * 0.48;
-controls.minDistance = 220;
-
-scene.add(new THREE.HemisphereLight(0xfbf6e6, 0x33443f, 1.5));
-
-const keyLight = new THREE.DirectionalLight(0xfff0d0, 1.7);
-keyLight.position.set(6000, 9000, 5200);
-scene.add(keyLight);
-
-const fillLight = new THREE.DirectionalLight(0xb9d5ff, 0.45);
-fillLight.position.set(-4000, 3600, -4600);
-scene.add(fillLight);
+let canvas!: HTMLCanvasElement;
+let viewerOverlay!: HTMLElement;
+let renderer!: THREE.WebGLRenderer;
+let scene!: THREE.Scene;
+let camera!: THREE.PerspectiveCamera;
+let controls!: OrbitControls;
 
 const trackLines: Line2[] = [];
 const clusterObjects: THREE.Object3D[] = [];
@@ -197,9 +220,35 @@ const keyboardForward = new THREE.Vector3();
 const keyboardRight = new THREE.Vector3();
 const keyboardOffset = new THREE.Vector3();
 
+// ─── UI callbacks (used in components) ────────────────────────────────────────
+
+function handleResetCamera() {
+	if (terrainRuntime) {
+		focusScene(terrainRuntime.metadata);
+	}
+}
+
+function zoomToCluster(cluster: TripCluster) {
+	controls.target.set(
+		cluster.x,
+		cluster.terrainHeight * (terrainRuntime?.currentExaggeration ?? 1),
+		cluster.z,
+	);
+	camera.position.set(
+		cluster.x + 260,
+		cluster.terrainHeight * (terrainRuntime?.currentExaggeration ?? 1) +
+			cluster.cardHeight +
+			180,
+		cluster.z + 260,
+	);
+	controls.update();
+}
+
+// ─── Utility functions ────────────────────────────────────────────────────────
+
 function setStatus(message: string, isError = false) {
-	statusNode.textContent = message;
-	statusNode.classList.toggle("trip-status-error", isError);
+	statusMsg.value = message;
+	statusError.value = isError;
 }
 
 function resizeRenderer() {
@@ -752,50 +801,6 @@ function handleViewerKeyboard(event: KeyboardEvent) {
 	}
 }
 
-function renderClusterList(trip: TripBundle) {
-	clusterListNode.replaceChildren(
-		...trip.clusters.map((cluster) => {
-			const members = trip.photoAnchors.filter(
-				(anchor) => anchor.clusterId === cluster.id,
-			);
-			const item = document.createElement("li");
-			item.className = "trip-cluster-item";
-
-			const title = document.createElement("strong");
-			title.textContent =
-				members.length === 1
-					? members[0].sourceLabel
-					: `${members.length} photos`;
-
-			const meta = document.createElement("p");
-			meta.textContent = members
-				.slice(0, 3)
-				.map((member) => member.description ?? member.sourceLabel)
-				.join(" · ");
-
-			item.append(title, meta);
-			item.addEventListener("click", () => {
-				controls.target.set(
-					cluster.x,
-					cluster.terrainHeight * (terrainRuntime?.currentExaggeration ?? 1),
-					cluster.z,
-				);
-				camera.position.set(
-					cluster.x + 260,
-					cluster.terrainHeight * (terrainRuntime?.currentExaggeration ?? 1) +
-						cluster.cardHeight +
-						180,
-					cluster.z + 260,
-				);
-				controls.update();
-			});
-			return item;
-		}),
-	);
-	clusterSectionNode.hidden = trip.clusters.length === 0;
-	clusterBadgeNode.textContent = String(trip.clusters.length);
-}
-
 async function loadTerrainAndTrip() {
 	setStatus("Loading trip bundle...");
 	const tripResponse = await fetch(new URL("./trip.json", document.baseURI));
@@ -900,12 +905,12 @@ async function loadTerrainAndTrip() {
 		trip.photoAnchors,
 		terrainRuntime.currentExaggeration,
 	);
-	renderClusterList(trip);
-	trackCountNode.textContent = String(trip.stats.trackCount);
-	photoCountNode.textContent = String(trip.stats.imageCount);
-	clusterCountNode.textContent = String(trip.stats.clusterCount);
-	statsNode.hidden = false;
-	resetButton.hidden = false;
+
+	tripClusters.value = trip.clusters;
+	tripPhotoAnchors.value = trip.photoAnchors;
+	tripStats.value = trip.stats;
+	resetVisible.value = true;
+
 	focusScene(metadata);
 	resizeRenderer();
 	setStatus("Trip scene ready.");
@@ -920,11 +925,42 @@ function animate() {
 	renderer.render(scene, camera);
 }
 
-resetButton.addEventListener("click", () => {
-	if (terrainRuntime) {
-		focusScene(terrainRuntime.metadata);
-	}
-});
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
+
+const app = document.querySelector<HTMLDivElement>("#app");
+if (!app) {
+	throw new Error("Application root was not found.");
+}
+
+render(<App />, app);
+
+canvas = app.querySelector<HTMLCanvasElement>(".trip-viewer")!;
+viewerOverlay = app.querySelector<HTMLElement>(".trip-viewer-overlay")!;
+
+renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xcbd7e2, 7000, 34000);
+
+camera = new THREE.PerspectiveCamera(44, 1, 10, 120000);
+controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.maxPolarAngle = Math.PI * 0.48;
+controls.minDistance = 220;
+
+scene.add(new THREE.HemisphereLight(0xfbf6e6, 0x33443f, 1.5));
+
+const keyLight = new THREE.DirectionalLight(0xfff0d0, 1.7);
+keyLight.position.set(6000, 9000, 5200);
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0xb9d5ff, 0.45);
+fillLight.position.set(-4000, 3600, -4600);
+scene.add(fillLight);
+
 canvas.addEventListener("keydown", handleViewerKeyboard);
 canvas.addEventListener("pointerdown", () => {
 	canvas.focus({ preventScroll: true });

@@ -21,9 +21,9 @@ import {
 import { gunzipSync, gzipSync } from "node:zlib";
 
 const DEFAULT_OUT_DIR = ".trip-export";
-const DEFAULT_CLUSTER_DISTANCE = 80;
+const DEFAULT_CLUSTER_DISTANCE = 100;
 const DEFAULT_CARD_HEIGHT = 280;
-const DEFAULT_TRACK_PADDING_METERS = 1000;
+const DEFAULT_TRACK_PADDING_METERS = 2000;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".avif"]);
 
 main();
