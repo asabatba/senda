@@ -75,6 +75,14 @@ type TerrainRuntime = {
 	currentExaggeration: number;
 };
 
+type TrackTimelineLabel = {
+	x: number;
+	y: number;
+	z: number;
+	text: string;
+	element: HTMLDivElement;
+};
+
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
 	throw new Error("Application root was not found.");
@@ -83,11 +91,11 @@ if (!app) {
 app.innerHTML = `
   <div class="trip-layout">
     <section class="trip-viewer-shell">
-      <canvas class="trip-viewer" aria-label="Trip scene export"></canvas>
+      <canvas class="trip-viewer" aria-label="Trip scene export" tabindex="0"></canvas>
       <div class="trip-viewer-overlay"></div>
       <div class="trip-viewer-hint">
         <strong>Trip Scene</strong>
-        <span>Orbit, zoom, and inspect clustered photo cards floating above the route.</span>
+        <span>Mouse or touch to inspect the route. Focus the scene for keyboard orbit, pan, zoom, and reset.</span>
       </div>
     </section>
     <aside class="trip-panel">
@@ -113,6 +121,7 @@ app.innerHTML = `
 `;
 
 const canvas = app.querySelector<HTMLCanvasElement>(".trip-viewer");
+const viewerOverlay = app.querySelector<HTMLElement>(".trip-viewer-overlay");
 const statusNode = app.querySelector<HTMLElement>("[data-status]");
 const statsNode = app.querySelector<HTMLElement>("[data-stats]");
 const trackCountNode = app.querySelector<HTMLElement>("[data-track-count]");
@@ -129,6 +138,7 @@ const resetButton = app.querySelector<HTMLButtonElement>("[data-reset-camera]");
 
 if (
 	!canvas ||
+	!viewerOverlay ||
 	!statusNode ||
 	!statsNode ||
 	!trackCountNode ||
@@ -172,10 +182,15 @@ scene.add(fillLight);
 
 const trackLines: Line2[] = [];
 const clusterObjects: THREE.Object3D[] = [];
+const trackTimelineLabels: TrackTimelineLabel[] = [];
 
 let terrainRuntime: TerrainRuntime | null = null;
 let tripBundle: TripBundle | null = null;
 let animationHandle = 0;
+
+const KEYBOARD_ORBIT_STEP = 0.08;
+const KEYBOARD_ZOOM_FACTOR = 1.16;
+const KEYBOARD_PAN_STEP_RATIO = 0.04;
 
 function setStatus(message: string, isError = false) {
 	statusNode.textContent = message;
@@ -228,6 +243,7 @@ function renderTrackSegments(
 			transparent: true,
 			opacity: 0.96,
 			depthWrite: false,
+			depthTest: false,
 		});
 		material.resolution.set(canvas.clientWidth, canvas.clientHeight);
 
@@ -238,9 +254,217 @@ function renderTrackSegments(
 		scene.add(line);
 		trackLines.push(line);
 	}
+
+	buildTrackTimelineLabels(segments);
 }
 
-async function loadTextureFromImage(imageUrl: string, countLabel: string) {
+function formatIsoDateTime(value: string | number | null) {
+	if (value === null) {
+		return null;
+	}
+
+	const parsed =
+		typeof value === "number" ? value : Date.parse(value);
+	if (Number.isNaN(parsed)) {
+		return typeof value === "string" ? value : null;
+	}
+
+	return new Date(parsed).toISOString().slice(0, 19).replace("T", " ");
+}
+
+function clearTrackTimelineLabels() {
+	for (const label of trackTimelineLabels) {
+		label.element.remove();
+	}
+	trackTimelineLabels.length = 0;
+}
+
+function interpolateTimelinePoint(
+	start: TripTrackPoint,
+	end: TripTrackPoint,
+	targetDistanceKm: number,
+) {
+	const distanceSpan = end.distanceKm - start.distanceKm;
+	const t =
+		distanceSpan <= 1e-9
+			? 0
+			: (targetDistanceKm - start.distanceKm) / distanceSpan;
+
+	return {
+		x: THREE.MathUtils.lerp(start.x, end.x, t),
+		y:
+			THREE.MathUtils.lerp(start.terrainHeight, end.terrainHeight, t) +
+			TRACK_SURFACE_OFFSET + 28,
+		z: THREE.MathUtils.lerp(start.z, end.z, t),
+		time:
+			start.time !== null && end.time !== null
+				? Math.round(THREE.MathUtils.lerp(start.time, end.time, t))
+				: start.time ?? end.time ?? null,
+	};
+}
+
+function collectTimelineLabelAnchors(segments: TripTrackSegment[]) {
+	const orderedPoints = segments.flatMap((segment) => segment.points);
+	if (orderedPoints.length === 0) {
+		return [];
+	}
+
+	const anchors: Array<{
+		x: number;
+		y: number;
+		z: number;
+		time: number | null;
+		distanceKm: number;
+	}> = [];
+
+	const firstPoint = orderedPoints[0];
+	anchors.push({
+		x: firstPoint.x,
+		y: firstPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
+		z: firstPoint.z,
+		time: firstPoint.time,
+		distanceKm: firstPoint.distanceKm,
+	});
+
+	const totalDistance = orderedPoints.at(-1)?.distanceKm ?? 0;
+	for (let targetDistanceKm = 5; targetDistanceKm < totalDistance; targetDistanceKm += 5) {
+		for (let index = 1; index < orderedPoints.length; index += 1) {
+			const start = orderedPoints[index - 1];
+			const end = orderedPoints[index];
+			if (
+				start.distanceKm <= targetDistanceKm &&
+				end.distanceKm >= targetDistanceKm
+			) {
+				const interpolated = interpolateTimelinePoint(
+					start,
+					end,
+					targetDistanceKm,
+				);
+				anchors.push({
+					...interpolated,
+					distanceKm: targetDistanceKm,
+				});
+				break;
+			}
+		}
+	}
+
+	const lastPoint = orderedPoints.at(-1);
+	const previousDistance = anchors.at(-1)?.distanceKm ?? 0;
+	if (lastPoint && totalDistance - previousDistance >= 4) {
+		anchors.push({
+			x: lastPoint.x,
+			y: lastPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
+			z: lastPoint.z,
+			time: lastPoint.time,
+			distanceKm: lastPoint.distanceKm,
+		});
+	}
+
+	return anchors;
+}
+
+function buildTrackTimelineLabels(segments: TripTrackSegment[]) {
+	clearTrackTimelineLabels();
+
+	for (const anchor of collectTimelineLabelAnchors(segments)) {
+		const text = formatIsoDateTime(anchor.time);
+		if (!text) {
+			continue;
+		}
+
+		const element = document.createElement("div");
+		element.className = "trip-track-label";
+		element.textContent = text;
+		element.hidden = true;
+		viewerOverlay.append(element);
+		trackTimelineLabels.push({
+			x: anchor.x,
+			y: anchor.y,
+			z: anchor.z,
+			text,
+			element,
+		});
+	}
+}
+
+function updateTrackTimelineLabels() {
+	if (trackTimelineLabels.length === 0) {
+		return;
+	}
+
+	const width = canvas.clientWidth;
+	const height = canvas.clientHeight;
+	if (!width || !height) {
+		return;
+	}
+
+	for (const label of trackTimelineLabels) {
+		const projected = new THREE.Vector3(label.x, label.y, label.z).project(camera);
+		const visible =
+			projected.z >= -1 &&
+			projected.z <= 1 &&
+			projected.x >= -1.08 &&
+			projected.x <= 1.08 &&
+			projected.y >= -1.08 &&
+			projected.y <= 1.08;
+
+		label.element.hidden = !visible;
+		if (!visible) {
+			continue;
+		}
+
+		const screenX = ((projected.x + 1) / 2) * width;
+		const screenY = ((1 - projected.y) / 2) * height;
+		label.element.style.transform = `translate(${screenX.toFixed(1)}px, ${screenY.toFixed(1)}px)`;
+	}
+}
+
+function drawCardTextBlock(
+	context: CanvasRenderingContext2D,
+	width: number,
+	height: number,
+	description: string | null,
+	captureTime: string | null,
+) {
+	const dateLabel = formatIsoDateTime(captureTime);
+	const hasDescription = Boolean(description && description.trim().length > 0);
+	const lines = [
+		hasDescription ? description?.trim() ?? null : null,
+		dateLabel,
+	].filter((value): value is string => Boolean(value));
+
+	if (lines.length === 0) {
+		return;
+	}
+
+	const blockHeight = hasDescription ? 114 : 74;
+	context.fillStyle = "rgba(12, 18, 21, 0.54)";
+	context.fillRect(0, height - blockHeight, width, blockHeight);
+
+	if (hasDescription) {
+		context.fillStyle = "#fff6dd";
+		context.font = "600 28px Georgia";
+		context.fillText(lines[0], 28, height - 64, width - 56);
+	}
+
+	if (dateLabel) {
+		context.fillStyle = "rgba(255, 246, 221, 0.88)";
+		context.font = hasDescription ? "500 22px 'Avenir Next'" : "600 26px 'Avenir Next'";
+		context.fillText(
+			dateLabel,
+			28,
+			hasDescription ? height - 28 : height - 32,
+			width - 56,
+		);
+	}
+}
+
+async function loadTextureFromImage(
+	imageUrl: string,
+	description: string | null,
+	captureTime: string | null,
+) {
 	const image = await new Promise<HTMLImageElement>((resolveImage, reject) => {
 		const element = new Image();
 		element.decoding = "async";
@@ -268,11 +492,7 @@ async function loadTextureFromImage(imageUrl: string, countLabel: string) {
 	context.fillStyle = "#102127";
 	context.fillRect(0, 0, width, height);
 	context.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
-	context.fillStyle = "rgba(12, 18, 21, 0.26)";
-	context.fillRect(0, height - 88, width, 88);
-	context.fillStyle = "#fff6dd";
-	context.font = "600 28px Georgia";
-	context.fillText(countLabel, 28, height - 34);
+	drawCardTextBlock(context, width, height, description, captureTime);
 	context.strokeStyle = "rgba(255, 246, 221, 0.34)";
 	context.lineWidth = 12;
 	context.strokeRect(6, 6, width - 12, height - 12);
@@ -290,13 +510,11 @@ async function buildClusterObject(
 ) {
 	const group = new THREE.Group();
 	group.position.set(cluster.x, 0, cluster.z);
+	group.renderOrder = 30;
 
 	const anchorY = cluster.terrainHeight * exaggeration + 6;
 	const cardY = anchorY + cluster.cardHeight;
 	const members = anchors.filter((anchor) => anchor.clusterId === cluster.id);
-	const countLabel =
-		members.length === 1 ? members[0].sourceLabel : `${members.length} photos`;
-
 	const marker = new THREE.Mesh(
 		new THREE.SphereGeometry(10, 20, 20),
 		new THREE.MeshStandardMaterial({
@@ -304,9 +522,12 @@ async function buildClusterObject(
 			emissive: "#865f15",
 			roughness: 0.42,
 			metalness: 0.04,
+			depthTest: false,
+			depthWrite: false,
 		}),
 	);
 	marker.position.set(0, anchorY, 0);
+	marker.renderOrder = 31;
 	group.add(marker);
 
 	const lineGeometry = new THREE.BufferGeometry().setFromPoints([
@@ -319,8 +540,11 @@ async function buildClusterObject(
 			color: 0xf2d39a,
 			transparent: true,
 			opacity: 0.9,
+			depthTest: false,
+			depthWrite: false,
 		}),
 	);
+	line.renderOrder = 31;
 	group.add(line);
 
 	const previewMembers = members.slice(0, Math.min(members.length, 3));
@@ -328,17 +552,20 @@ async function buildClusterObject(
 		const preview = previewMembers[index];
 		const texture = await loadTextureFromImage(
 			preview.imageUrl,
-			index === 0 ? countLabel : "",
+			index === 0 ? preview.description : null,
+			index === 0 ? preview.captureTime : null,
 		);
 		const sprite = new THREE.Sprite(
 			new THREE.SpriteMaterial({
 				map: texture,
 				transparent: true,
 				depthWrite: false,
+				depthTest: false,
 			}),
 		);
 		sprite.scale.set(250, 164, 1);
 		sprite.position.set(index * 14 - 12, cardY + index * 14, -index * 10);
+		sprite.renderOrder = 32;
 		group.add(sprite);
 	}
 
@@ -382,6 +609,116 @@ function focusScene(metadata: TerrainMetadata) {
 	camera.far = maxSpan * 8;
 	camera.updateProjectionMatrix();
 	controls.update();
+}
+
+function orbitCamera(deltaAzimuth: number, deltaPolar: number) {
+	const offset = camera.position.clone().sub(controls.target);
+	const spherical = new THREE.Spherical().setFromVector3(offset);
+	spherical.theta += deltaAzimuth;
+	spherical.phi = THREE.MathUtils.clamp(
+		spherical.phi + deltaPolar,
+		0.0001,
+		controls.maxPolarAngle,
+	);
+	offset.setFromSpherical(spherical);
+	camera.position.copy(controls.target).add(offset);
+	controls.update();
+}
+
+function panCamera(horizontal: number, depth: number) {
+	const offset = camera.position.clone().sub(controls.target);
+	const distance = Math.max(offset.length(), controls.minDistance);
+	const panStep = Math.max(distance * KEYBOARD_PAN_STEP_RATIO, 30);
+	const forward = controls.target.clone().sub(camera.position);
+	forward.y = 0;
+	if (forward.lengthSq() === 0) {
+		forward.set(0, 0, -1);
+	}
+	forward.normalize();
+	const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+	const translation = right
+		.multiplyScalar(horizontal * panStep)
+		.add(forward.multiplyScalar(depth * panStep));
+	camera.position.add(translation);
+	controls.target.add(translation);
+	controls.update();
+}
+
+function zoomCamera(scale: number) {
+	const offset = camera.position.clone().sub(controls.target);
+	const currentDistance = offset.length();
+	const nextDistance = THREE.MathUtils.clamp(
+		currentDistance / scale,
+		controls.minDistance,
+		controls.maxDistance,
+	);
+	offset.setLength(nextDistance);
+	camera.position.copy(controls.target).add(offset);
+	controls.update();
+}
+
+function handleViewerKeyboard(event: KeyboardEvent) {
+	if (document.activeElement !== canvas) {
+		return;
+	}
+
+	if (!terrainRuntime) {
+		return;
+	}
+
+	switch (event.key) {
+		case "ArrowLeft":
+			event.preventDefault();
+			if (event.shiftKey) {
+				panCamera(-1, 0);
+			} else {
+				orbitCamera(-KEYBOARD_ORBIT_STEP, 0);
+			}
+			return;
+		case "ArrowRight":
+			event.preventDefault();
+			if (event.shiftKey) {
+				panCamera(1, 0);
+			} else {
+				orbitCamera(KEYBOARD_ORBIT_STEP, 0);
+			}
+			return;
+		case "ArrowUp":
+			event.preventDefault();
+			if (event.shiftKey) {
+				panCamera(0, 1);
+			} else {
+				orbitCamera(0, -KEYBOARD_ORBIT_STEP);
+			}
+			return;
+		case "ArrowDown":
+			event.preventDefault();
+			if (event.shiftKey) {
+				panCamera(0, -1);
+			} else {
+				orbitCamera(0, KEYBOARD_ORBIT_STEP);
+			}
+			return;
+		case "+":
+		case "=":
+			event.preventDefault();
+			zoomCamera(KEYBOARD_ZOOM_FACTOR);
+			return;
+		case "-":
+		case "_":
+			event.preventDefault();
+			zoomCamera(1 / KEYBOARD_ZOOM_FACTOR);
+			return;
+		case "0":
+		case "r":
+		case "R":
+		case "Home":
+			event.preventDefault();
+			focusScene(terrainRuntime.metadata);
+			return;
+		default:
+			return;
+	}
 }
 
 function renderClusterList(trip: TripBundle) {
@@ -546,6 +883,7 @@ async function loadTerrainAndTrip() {
 function animate() {
 	animationHandle = window.requestAnimationFrame(animate);
 	controls.update();
+	updateTrackTimelineLabels();
 	renderer.render(scene, camera);
 }
 
@@ -553,6 +891,10 @@ resetButton.addEventListener("click", () => {
 	if (terrainRuntime) {
 		focusScene(terrainRuntime.metadata);
 	}
+});
+canvas.addEventListener("keydown", handleViewerKeyboard);
+canvas.addEventListener("pointerdown", () => {
+	canvas.focus({ preventScroll: true });
 });
 
 const resizeObserver = new ResizeObserver(() => resizeRenderer());
@@ -580,6 +922,7 @@ window.addEventListener("beforeunload", () => {
 	for (const object of clusterObjects) {
 		scene.remove(object);
 	}
+	clearTrackTimelineLabels();
 	terrainRuntime?.mesh.material.map?.dispose();
 	terrainRuntime?.mesh.material.dispose();
 	terrainRuntime?.geometry.dispose();

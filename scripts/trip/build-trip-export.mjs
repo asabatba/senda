@@ -18,11 +18,12 @@ import {
 	relative,
 	resolve,
 } from "node:path";
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 const DEFAULT_OUT_DIR = ".trip-export";
 const DEFAULT_CLUSTER_DISTANCE = 60;
 const DEFAULT_CARD_HEIGHT = 280;
+const DEFAULT_TRACK_PADDING_METERS = 1000;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".avif"]);
 
 main();
@@ -34,7 +35,9 @@ function main() {
 
 	const terrain = loadTerrainDataset(repoRoot);
 	const tracks = loadTracks(options.gpx, terrain);
-	const imageCandidates = discoverImages(options.images, repoRoot);
+	const imageDiscovery = discoverImages(options.images, repoRoot);
+	const imageCandidates = imageDiscovery.files;
+	validateImageDiscovery(options.images, imageDiscovery.unmatchedPatterns);
 	const csvEntries = options.csv
 		? parseImageCsv(resolve(repoRoot, options.csv))
 		: [];
@@ -44,28 +47,49 @@ function main() {
 		repoRoot,
 		options.csv,
 	);
-	const placedImages = placeImages(images, csvEntries, tracks.lookup, terrain);
+	const placedImages = placeImages(
+		images,
+		csvEntries,
+		tracks.lookup,
+		terrain,
+		options.imageTimeHourCorrection,
+	);
 	const clustered = clusterAnchors(
 		placedImages,
 		options.clusterDistance,
 		options.cardHeight,
 	);
+	const terrainSubset = buildTerrainSubset(
+		terrain,
+		tracks.segments,
+		options.trackPaddingMeters,
+	);
+	const rebasedTracks = rebaseTrackSegments(
+		tracks.segments,
+		terrain.metadata,
+		terrainSubset.metadata,
+	);
+	const rebasedClusters = rebaseClusteredData(
+		clustered,
+		terrain.metadata,
+		terrainSubset.metadata,
+	);
 
 	const outDir = resolve(repoRoot, options.outDir);
 	const tempBuildDir = resolve(repoRoot, ".codex-tmp", "trip-export-build");
 	prepareOutDir(outDir);
-	const copiedImages = copyImages(clustered.anchors, outDir);
+	const copiedImages = copyImages(rebasedClusters.anchors, outDir);
 	const tripBundle = buildTripBundle(
-		tracks,
-		clustered,
+		{ segments: rebasedTracks },
+		rebasedClusters,
 		copiedImages,
-		terrain.metadata.orthophoto.defaultPreset,
+		terrainSubset.metadata.orthophoto.defaultPreset,
 		options.cardHeight,
 	);
 
 	buildViewer(tempBuildDir, repoRoot);
 	copyBuiltViewer(tempBuildDir, outDir);
-	copyTerrainSubset(terrain, outDir);
+	writeTerrainSubset(terrainSubset, outDir);
 	writeFileSync(
 		join(outDir, "trip.json"),
 		`${JSON.stringify(tripBundle, null, "\t")}\n`,
@@ -76,9 +100,12 @@ function main() {
 		gpxFiles: options.gpx.length,
 		discoveredImages: imageCandidates.length,
 		manifestRows: csvEntries.length,
-		placedImages: clustered.anchors.length,
-		clusterCount: clustered.clusters.length,
+		placedImages: rebasedClusters.anchors.length,
+		clusterCount: rebasedClusters.clusters.length,
 		unplacedImages: placedImages.unplaced.length,
+		imageTimeHourCorrection: options.imageTimeHourCorrection,
+		trackPaddingMeters: options.trackPaddingMeters,
+		terrainSizeMeters: terrainSubset.metadata.sizeMeters,
 		outDir: relative(repoRoot, outDir) || ".",
 	};
 	process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
@@ -99,6 +126,8 @@ function parseArgs(args) {
 		outDir: DEFAULT_OUT_DIR,
 		clusterDistance: DEFAULT_CLUSTER_DISTANCE,
 		cardHeight: DEFAULT_CARD_HEIGHT,
+		imageTimeHourCorrection: 0,
+		trackPaddingMeters: DEFAULT_TRACK_PADDING_METERS,
 	};
 
 	for (let index = 0; index < args.length; index += 1) {
@@ -134,11 +163,22 @@ function parseArgs(args) {
 			index += 1;
 			continue;
 		}
+		if (token === "--image-time-hour-correction") {
+			options.imageTimeHourCorrection = parseNumber(token, value);
+			index += 1;
+			continue;
+		}
+		if (token === "--track-padding-meters") {
+			options.trackPaddingMeters = parsePositiveNumber(token, value);
+			index += 1;
+			continue;
+		}
 		if (token === "--help" || token === "-h") {
 			process.stdout.write(
 				[
 					"Usage: pnpm trip:build --gpx file.gpx [--gpx file2.gpx] [--images path|glob] [--csv manifest.csv]",
-					"\t[--out-dir .trip-export] [--cluster-distance 60] [--card-height 280]",
+					"\t[--out-dir .trip-export] [--cluster-distance 60] [--card-height 280] [--image-time-hour-correction 0]",
+					"\t[--track-padding-meters 1000]",
 				].join("\n") + "\n",
 			);
 			process.exit(0);
@@ -157,9 +197,17 @@ function assertValue(flag, value) {
 }
 
 function parsePositiveNumber(flag, value) {
-	const parsed = Number.parseFloat(assertValue(flag, value));
+	const parsed = parseNumber(flag, value);
 	if (!Number.isFinite(parsed) || parsed <= 0) {
 		throw new Error(`${flag} must be a positive number.`);
+	}
+	return parsed;
+}
+
+function parseNumber(flag, value) {
+	const parsed = Number.parseFloat(assertValue(flag, value));
+	if (!Number.isFinite(parsed)) {
+		throw new Error(`${flag} must be a number.`);
 	}
 	return parsed;
 }
@@ -494,7 +542,9 @@ function interpolateTrackPoint(prev, next, t) {
 
 function discoverImages(patterns, repoRoot) {
 	const discovered = new Map();
+	const unmatchedPatterns = [];
 	for (const pattern of patterns) {
+		let matchedForPattern = 0;
 		const resolvedPattern = isAbsolute(pattern)
 			? pattern
 			: resolve(repoRoot, pattern);
@@ -504,16 +554,22 @@ function discoverImages(patterns, repoRoot) {
 				for (const filePath of walkFiles(resolvedPattern)) {
 					if (isImageFile(filePath)) {
 						discovered.set(filePath, filePath);
+						matchedForPattern += 1;
 					}
 				}
 			} else if (stats.isFile() && isImageFile(resolvedPattern)) {
 				discovered.set(resolvedPattern, resolvedPattern);
+				matchedForPattern += 1;
+			}
+			if (matchedForPattern === 0) {
+				unmatchedPatterns.push(pattern);
 			}
 			continue;
 		}
 
 		const baseDir = resolveGlobBase(resolvedPattern);
 		if (!existsSync(baseDir)) {
+			unmatchedPatterns.push(pattern);
 			continue;
 		}
 		const regex = globToRegex(toPosixPath(relative(baseDir, resolvedPattern)));
@@ -524,10 +580,31 @@ function discoverImages(patterns, repoRoot) {
 			const candidate = toPosixPath(relative(baseDir, filePath));
 			if (regex.test(candidate)) {
 				discovered.set(filePath, filePath);
+				matchedForPattern += 1;
 			}
 		}
+		if (matchedForPattern === 0) {
+			unmatchedPatterns.push(pattern);
+		}
 	}
-	return Array.from(discovered.values()).sort();
+	return {
+		files: Array.from(discovered.values()).sort(),
+		unmatchedPatterns,
+	};
+}
+
+function validateImageDiscovery(patterns, unmatchedPatterns) {
+	if (patterns.length === 0 || unmatchedPatterns.length === 0) {
+		return;
+	}
+
+	throw new Error(
+		[
+			`No image files matched: ${unmatchedPatterns.join(", ")}`,
+			"If you are invoking this from PowerShell, quote the glob argument.",
+			'Example: pnpm trip:build --gpx data/test/comodoto-mini.gpx --images "data/test/*.JPG"',
+		].join("\n"),
+	);
 }
 
 function mergeImageInputs(imagePaths, csvEntries, repoRoot, csvPath) {
@@ -660,7 +737,13 @@ function parseCsv(text) {
 	});
 }
 
-function placeImages(images, csvEntries, lookup, terrain) {
+function placeImages(
+	images,
+	csvEntries,
+	lookup,
+	terrain,
+	imageTimeHourCorrection,
+) {
 	const manifestMap = new Map();
 	for (const entry of csvEntries) {
 		if (!entry.image) {
@@ -676,7 +759,13 @@ function placeImages(images, csvEntries, lookup, terrain) {
 			manifestMap.get(normalizeLookupKey(image.label)) ??
 			manifestMap.get(normalizeLookupKey(basename(image.absolutePath))) ??
 			null;
-		const resolved = resolveImagePlacement(image, manifest, lookup, terrain);
+		const resolved = resolveImagePlacement(
+			image,
+			manifest,
+			lookup,
+			terrain,
+			imageTimeHourCorrection,
+		);
 		if (!resolved) {
 			unplaced.push({
 				label: image.label,
@@ -690,7 +779,7 @@ function placeImages(images, csvEntries, lookup, terrain) {
 			sourcePath: image.absolutePath,
 			sourceLabel: image.label,
 			description: manifest?.description ?? null,
-			captureTime: resolved.captureTime ?? image.exif.captureTime ?? null,
+			captureTime: resolved.captureTime ?? null,
 			placedBy: resolved.placedBy,
 			lat: resolved.lat,
 			lon: resolved.lon,
@@ -715,7 +804,18 @@ function placeImages(images, csvEntries, lookup, terrain) {
 	return { anchors, unplaced };
 }
 
-function resolveImagePlacement(image, manifest, lookup, terrain) {
+function resolveImagePlacement(
+	image,
+	manifest,
+	lookup,
+	terrain,
+	imageTimeHourCorrection,
+) {
+	const correctedExifCaptureTime = applyHourCorrection(
+		image.exif.captureTime,
+		imageTimeHourCorrection,
+	);
+
 	if (manifest?.lat && manifest?.lon) {
 		const projected = projectLatLonToTerrain(
 			Number.parseFloat(manifest.lat),
@@ -728,7 +828,10 @@ function resolveImagePlacement(image, manifest, lookup, terrain) {
 				lat: Number.parseFloat(manifest.lat),
 				lon: Number.parseFloat(manifest.lon),
 				projected,
-				captureTime: normalizeTimestamp(manifest.time),
+				captureTime: normalizeTimestamp(
+					manifest.time,
+					imageTimeHourCorrection,
+				),
 			};
 		}
 	}
@@ -745,12 +848,15 @@ function resolveImagePlacement(image, manifest, lookup, terrain) {
 				lat: image.exif.lat,
 				lon: image.exif.lon,
 				projected,
-				captureTime: image.exif.captureTime,
+				captureTime: correctedExifCaptureTime,
 			};
 		}
 	}
 
-	const csvTime = normalizeTimestamp(manifest?.time ?? null);
+	const csvTime = normalizeTimestamp(
+		manifest?.time ?? null,
+		imageTimeHourCorrection,
+	);
 	if (csvTime) {
 		const interpolated = lookup.interpolateByTime(Date.parse(csvTime));
 		if (interpolated?.projected) {
@@ -774,14 +880,14 @@ function resolveImagePlacement(image, manifest, lookup, terrain) {
 				lat: interpolated.lat,
 				lon: interpolated.lon,
 				projected: interpolated.projected,
-				captureTime: csvTime ?? image.exif.captureTime,
+				captureTime: csvTime ?? correctedExifCaptureTime,
 			};
 		}
 	}
 
-	if (image.exif.captureTime) {
+	if (correctedExifCaptureTime) {
 		const interpolated = lookup.interpolateByTime(
-			Date.parse(image.exif.captureTime),
+			Date.parse(correctedExifCaptureTime),
 		);
 		if (interpolated?.projected) {
 			return {
@@ -789,7 +895,7 @@ function resolveImagePlacement(image, manifest, lookup, terrain) {
 				lat: interpolated.lat,
 				lon: interpolated.lon,
 				projected: interpolated.projected,
-				captureTime: image.exif.captureTime,
+				captureTime: correctedExifCaptureTime,
 			};
 		}
 	}
@@ -944,35 +1050,320 @@ function copyBuiltViewer(tempBuildDir, outDir) {
 	copyDirectory(join(tempBuildDir, "assets"), join(outDir, "assets"));
 }
 
-function copyTerrainSubset(dataset, outDir) {
+function writeTerrainSubset(dataset, outDir) {
 	const terrainDir = join(outDir, "terrain");
 	mkdirSync(terrainDir, { recursive: true });
+	writeFileSync(
+		join(terrainDir, dataset.metadata.heightAsset.url),
+		dataset.heightAssetBytes,
+	);
 	const defaultPresetId = dataset.metadata.orthophoto.defaultPreset;
 	const defaultPreset = dataset.metadata.orthophoto.presets[defaultPresetId];
-	const exportedMetadata = {
-		...dataset.metadata,
-		orthophoto: {
-			defaultPreset: defaultPresetId,
-			presets: {
-				[defaultPresetId]: defaultPreset,
-			},
-		},
-		namedPlaces: null,
-		overlay: {
-			url: null,
-		},
-	};
-
-	copyFileSync(
-		dataset.heightAssetPath,
-		join(terrainDir, exportedMetadata.heightAsset.url),
-	);
-	copyFileSync(dataset.orthophotoPath, join(terrainDir, defaultPreset.url));
+	writeFileSync(join(terrainDir, defaultPreset.url), dataset.orthophotoBytes);
 	writeFileSync(
 		join(terrainDir, "terrain.json"),
-		`${JSON.stringify(exportedMetadata, null, "\t")}\n`,
+		`${JSON.stringify(dataset.metadata, null, "\t")}\n`,
 		"utf8",
 	);
+}
+
+function buildTerrainSubset(dataset, trackSegments, paddingMeters) {
+	const cropBounds = computeTrackCropBounds(
+		dataset.metadata,
+		trackSegments,
+		paddingMeters,
+	);
+	const heightWindow = computeRasterWindow(
+		dataset.metadata.bounds,
+		dataset.metadata.width,
+		dataset.metadata.height,
+		cropBounds,
+	);
+	const croppedHeightCodes = cropHeightCodes(
+		dataset.heightCodes,
+		dataset.metadata.width,
+		heightWindow,
+	);
+	const croppedBounds = boundsFromWindow(
+		dataset.metadata.bounds,
+		dataset.metadata.width,
+		dataset.metadata.height,
+		heightWindow,
+	);
+	const rawHeightBytes = Buffer.from(
+		croppedHeightCodes.buffer,
+		croppedHeightCodes.byteOffset,
+		croppedHeightCodes.byteLength,
+	);
+
+	const defaultPresetId = dataset.metadata.orthophoto.defaultPreset;
+	const defaultPreset = dataset.metadata.orthophoto.presets[defaultPresetId];
+	const orthophotoBounds = intersectBounds(
+		croppedBounds,
+		defaultPreset.coverageBounds,
+	);
+	const orthophotoWindow = computeRasterWindow(
+		defaultPreset.coverageBounds,
+		defaultPreset.width,
+		defaultPreset.height,
+		orthophotoBounds,
+	);
+	const rawOrthophotoBytes =
+		defaultPreset.compression === "gzip"
+			? gunzipSync(readFileSync(dataset.orthophotoPath))
+			: readFileSync(dataset.orthophotoPath);
+	const croppedOrthophotoBytes = cropRgbaPixels(
+		rawOrthophotoBytes,
+		defaultPreset.width,
+		orthophotoWindow,
+	);
+	const croppedOrthophotoBounds = boundsFromWindow(
+		defaultPreset.coverageBounds,
+		defaultPreset.width,
+		defaultPreset.height,
+		orthophotoWindow,
+	);
+
+	return {
+		metadata: {
+			...dataset.metadata,
+			width: heightWindow.width,
+			height: heightWindow.height,
+			bounds: croppedBounds,
+			sizeMeters: {
+				width: croppedBounds.east - croppedBounds.west,
+				height: croppedBounds.north - croppedBounds.south,
+			},
+			orthophoto: {
+				defaultPreset: defaultPresetId,
+				presets: {
+					[defaultPresetId]: {
+						...defaultPreset,
+						width: orthophotoWindow.width,
+						height: orthophotoWindow.height,
+						coverageBounds: croppedOrthophotoBounds,
+					},
+				},
+			},
+			namedPlaces: null,
+			overlay: {
+				url: null,
+			},
+		},
+		heightAssetBytes:
+			dataset.metadata.heightAsset.compression === "gzip"
+				? gzipSync(rawHeightBytes)
+				: rawHeightBytes,
+		orthophotoBytes:
+			defaultPreset.compression === "gzip"
+				? gzipSync(croppedOrthophotoBytes)
+				: croppedOrthophotoBytes,
+	};
+}
+
+function computeTrackCropBounds(metadata, trackSegments, paddingMeters) {
+	const center = getTerrainCenter(metadata);
+	let west = Number.POSITIVE_INFINITY;
+	let south = Number.POSITIVE_INFINITY;
+	let east = Number.NEGATIVE_INFINITY;
+	let north = Number.NEGATIVE_INFINITY;
+
+	for (const segment of trackSegments) {
+		for (const point of segment.points) {
+			const projected = localToProjected(point.x, point.z, center);
+			west = Math.min(west, projected.easting);
+			south = Math.min(south, projected.northing);
+			east = Math.max(east, projected.easting);
+			north = Math.max(north, projected.northing);
+		}
+	}
+
+	return {
+		west: clamp(west - paddingMeters, metadata.bounds.west, metadata.bounds.east),
+		south: clamp(
+			south - paddingMeters,
+			metadata.bounds.south,
+			metadata.bounds.north,
+		),
+		east: clamp(east + paddingMeters, metadata.bounds.west, metadata.bounds.east),
+		north: clamp(
+			north + paddingMeters,
+			metadata.bounds.south,
+			metadata.bounds.north,
+		),
+	};
+}
+
+function computeRasterWindow(bounds, width, height, cropBounds) {
+	const maxColumn = width - 1;
+	const maxRow = height - 1;
+	let colStart = clamp(
+		Math.floor(
+			((cropBounds.west - bounds.west) / (bounds.east - bounds.west)) *
+				maxColumn,
+		),
+		0,
+		maxColumn,
+	);
+	let colEnd = clamp(
+		Math.ceil(
+			((cropBounds.east - bounds.west) / (bounds.east - bounds.west)) *
+				maxColumn,
+		),
+		0,
+		maxColumn,
+	);
+	let rowStart = clamp(
+		Math.floor(
+			((bounds.north - cropBounds.north) / (bounds.north - bounds.south)) *
+				maxRow,
+		),
+		0,
+		maxRow,
+	);
+	let rowEnd = clamp(
+		Math.ceil(
+			((bounds.north - cropBounds.south) / (bounds.north - bounds.south)) *
+				maxRow,
+		),
+		0,
+		maxRow,
+	);
+
+	if (colEnd === colStart && width > 1) {
+		if (colEnd < maxColumn) {
+			colEnd += 1;
+		} else {
+			colStart -= 1;
+		}
+	}
+	if (rowEnd === rowStart && height > 1) {
+		if (rowEnd < maxRow) {
+			rowEnd += 1;
+		} else {
+			rowStart -= 1;
+		}
+	}
+
+	return {
+		colStart,
+		colEnd,
+		rowStart,
+		rowEnd,
+		width: colEnd - colStart + 1,
+		height: rowEnd - rowStart + 1,
+	};
+}
+
+function cropHeightCodes(heightCodes, sourceWidth, window) {
+	const cropped = new Uint16Array(window.width * window.height);
+	for (let row = 0; row < window.height; row += 1) {
+		const sourceStart = (window.rowStart + row) * sourceWidth + window.colStart;
+		cropped.set(
+			heightCodes.subarray(sourceStart, sourceStart + window.width),
+			row * window.width,
+		);
+	}
+	return cropped;
+}
+
+function cropRgbaPixels(bytes, sourceWidth, window) {
+	const rowStride = sourceWidth * 4;
+	const cropped = Buffer.alloc(window.width * window.height * 4);
+	for (let row = 0; row < window.height; row += 1) {
+		const sourceOffset =
+			(window.rowStart + row) * rowStride + window.colStart * 4;
+		bytes.copy(
+			cropped,
+			row * window.width * 4,
+			sourceOffset,
+			sourceOffset + window.width * 4,
+		);
+	}
+	return cropped;
+}
+
+function boundsFromWindow(bounds, width, height, window) {
+	const maxColumn = width - 1;
+	const maxRow = height - 1;
+	return {
+		west:
+			bounds.west +
+			(window.colStart / maxColumn) * (bounds.east - bounds.west),
+		south:
+			bounds.north -
+			(window.rowEnd / maxRow) * (bounds.north - bounds.south),
+		east:
+			bounds.west +
+			(window.colEnd / maxColumn) * (bounds.east - bounds.west),
+		north:
+			bounds.north -
+			(window.rowStart / maxRow) * (bounds.north - bounds.south),
+	};
+}
+
+function intersectBounds(left, right) {
+	const west = Math.max(left.west, right.west);
+	const south = Math.max(left.south, right.south);
+	const east = Math.min(left.east, right.east);
+	const north = Math.min(left.north, right.north);
+	return {
+		west: Math.min(west, east),
+		south: Math.min(south, north),
+		east: Math.max(west, east),
+		north: Math.max(south, north),
+	};
+}
+
+function rebaseTrackSegments(trackSegments, originalMetadata, croppedMetadata) {
+	return trackSegments.map((segment) => ({
+		...segment,
+		points: segment.points.map((point) => ({
+			...point,
+			...rebaseLocalPoint(point, originalMetadata, croppedMetadata),
+		})),
+	}));
+}
+
+function rebaseClusteredData(clustered, originalMetadata, croppedMetadata) {
+	return {
+		anchors: clustered.anchors.map((anchor) => ({
+			...anchor,
+			...rebaseLocalPoint(anchor, originalMetadata, croppedMetadata),
+		})),
+		clusters: clustered.clusters.map((cluster) => ({
+			...cluster,
+			...rebaseLocalPoint(cluster, originalMetadata, croppedMetadata),
+		})),
+	};
+}
+
+function rebaseLocalPoint(point, originalMetadata, croppedMetadata) {
+	const originalCenter = getTerrainCenter(originalMetadata);
+	const croppedCenter = getTerrainCenter(croppedMetadata);
+	const projected = localToProjected(point.x, point.z, originalCenter);
+	return projectedToLocal(projected.easting, projected.northing, croppedCenter);
+}
+
+function getTerrainCenter(metadata) {
+	return {
+		easting: (metadata.bounds.west + metadata.bounds.east) / 2,
+		northing: (metadata.bounds.north + metadata.bounds.south) / 2,
+	};
+}
+
+function localToProjected(x, z, center) {
+	return {
+		easting: center.easting + x,
+		northing: center.northing - z,
+	};
+}
+
+function projectedToLocal(easting, northing, center) {
+	return {
+		x: easting - center.easting,
+		z: center.northing - northing,
+	};
 }
 
 function projectLatLonToTerrain(lat, lon, dataset) {
@@ -1072,21 +1463,31 @@ function parseExifTiff(buffer) {
 			const type = readUint16(entryOffset + 2);
 			const valueCount = readUint32(entryOffset + 4);
 			const bytes = (typeSize.get(type) ?? 1) * valueCount;
-			const valueOffset =
-				bytes <= 4 ? entryOffset + 8 : readUint32(entryOffset + 8);
+			const rawValueOffset = readUint32(entryOffset + 8);
 			entries.set(tag, {
 				type,
 				valueCount,
-				valueOffset,
+				bytes,
+				rawValueOffset,
 				inlineOffset: entryOffset + 8,
 			});
 		}
 		return entries;
 	}
 
+	function readEntryUnsigned(entry) {
+		if (entry.type === 3) {
+			return readUint16(entry.inlineOffset);
+		}
+		return entry.rawValueOffset;
+	}
+
+	function readEntryDataOffset(entry) {
+		return entry.bytes <= 4 ? entry.inlineOffset : entry.rawValueOffset;
+	}
+
 	function readAscii(entry) {
-		const start =
-			entry.valueCount <= 4 ? entry.inlineOffset : entry.valueOffset;
+		const start = readEntryDataOffset(entry);
 		return buffer
 			.toString("ascii", start, start + entry.valueCount)
 			.replace(/\u0000+$/g, "")
@@ -1100,7 +1501,7 @@ function parseExifTiff(buffer) {
 			return null;
 		}
 		const ref = readAscii(refEntry);
-		const base = valueEntry.valueOffset;
+		const base = readEntryDataOffset(valueEntry);
 		const degrees = readRational(base);
 		const minutes = readRational(base + 8);
 		const seconds = readRational(base + 16);
@@ -1112,10 +1513,10 @@ function parseExifTiff(buffer) {
 	const exifPointer = ifd0.get(0x8769);
 	const gpsPointer = ifd0.get(0x8825);
 	const exifIfd = exifPointer
-		? readIfdEntries(exifPointer.valueOffset)
+		? readIfdEntries(readEntryUnsigned(exifPointer))
 		: new Map();
 	const gpsIfd = gpsPointer
-		? readIfdEntries(gpsPointer.valueOffset)
+		? readIfdEntries(readEntryUnsigned(gpsPointer))
 		: new Map();
 	const timestampEntry = exifIfd.get(0x9003) ?? exifIfd.get(0x0132);
 	const captureTime = timestampEntry
@@ -1127,21 +1528,37 @@ function parseExifTiff(buffer) {
 	return { lat, lon, captureTime };
 }
 
-function normalizeExifTimestamp(value) {
+function applyHourCorrection(isoLikeValue, hourCorrection) {
+	if (!isoLikeValue || hourCorrection === 0) {
+		return isoLikeValue;
+	}
+	const parsed = Date.parse(isoLikeValue);
+	if (Number.isNaN(parsed)) {
+		return null;
+	}
+	return new Date(parsed + hourCorrection * 60 * 60 * 1000).toISOString();
+}
+
+function normalizeExifTimestamp(value, hourCorrection = 0) {
 	if (!value) {
 		return null;
 	}
 	const normalized = value.replace(/^(\d{4}):(\d{2}):(\d{2}) /, "$1-$2-$3T");
 	const iso = normalized.endsWith("Z") ? normalized : `${normalized}Z`;
-	return Number.isNaN(Date.parse(iso)) ? null : iso;
+	if (Number.isNaN(Date.parse(iso))) {
+		return null;
+	}
+	return applyHourCorrection(iso, hourCorrection);
 }
 
-function normalizeTimestamp(value) {
+function normalizeTimestamp(value, hourCorrection = 0) {
 	if (!value) {
 		return null;
 	}
 	const parsed = Date.parse(value);
-	return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
+	return Number.isNaN(parsed)
+		? null
+		: applyHourCorrection(new Date(parsed).toISOString(), hourCorrection);
 }
 
 function hasGlob(pathValue) {
