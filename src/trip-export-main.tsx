@@ -86,9 +86,7 @@ type TerrainRuntime = {
 };
 
 type TrackTimelineLabel = {
-	x: number;
-	y: number;
-	z: number;
+	anchor: THREE.Object3D;
 	element: HTMLDivElement;
 };
 
@@ -224,6 +222,7 @@ const keyboardForward = new THREE.Vector3();
 const keyboardRight = new THREE.Vector3();
 const keyboardOffset = new THREE.Vector3();
 const labelWorldPos = new THREE.Vector3();
+const labelProjectedPos = new THREE.Vector3();
 
 // ─── UI callbacks (used in components) ────────────────────────────────────────
 
@@ -312,7 +311,7 @@ function renderTrackSegments(
 		trackLines.push(line);
 	}
 
-	buildTrackTimelineLabels(segments);
+	buildTrackTimelineLabels(segments, exaggeration);
 }
 
 function formatIsoDateTime(value: string | number | null, timezone?: string) {
@@ -345,12 +344,17 @@ function formatIsoDateTime(value: string | number | null, timezone?: string) {
 
 function clearTrackTimelineLabels() {
 	for (const label of trackTimelineLabels) {
+		scene.remove(label.anchor);
 		label.element.remove();
 	}
 	trackTimelineLabels.length = 0;
 }
 
-function interpolateAtTime(points: TripTrackPoint[], targetMs: number) {
+function interpolateAtTime(
+	points: TripTrackPoint[],
+	targetMs: number,
+	exaggeration: number,
+) {
 	for (let i = 1; i < points.length; i += 1) {
 		const start = points[i - 1]!;
 		const end = points[i]!;
@@ -361,7 +365,8 @@ function interpolateAtTime(points: TripTrackPoint[], targetMs: number) {
 			return {
 				x: THREE.MathUtils.lerp(start.x, end.x, t),
 				y:
-					THREE.MathUtils.lerp(start.terrainHeight, end.terrainHeight, t) +
+					THREE.MathUtils.lerp(start.terrainHeight, end.terrainHeight, t) *
+						exaggeration +
 					TRACK_SURFACE_OFFSET +
 					28,
 				z: THREE.MathUtils.lerp(start.z, end.z, t),
@@ -380,18 +385,18 @@ type TimelineAnchor = {
 };
 
 function collectTimelineLabelAnchors(
-	segments: TripTrackSegment[],
+	points: TripTrackPoint[],
+	exaggeration: number,
 ): TimelineAnchor[] {
-	const orderedPoints = segments.flatMap((s) => s.points);
-	if (orderedPoints.length === 0) return [];
+	if (points.length === 0) return [];
 
-	const firstPoint = orderedPoints[0]!;
-	const lastPoint = orderedPoints.at(-1)!;
+	const firstPoint = points[0]!;
+	const lastPoint = points.at(-1)!;
 	const anchors: TimelineAnchor[] = [];
 
 	anchors.push({
 		x: firstPoint.x,
-		y: firstPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
+		y: firstPoint.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET + 28,
 		z: firstPoint.z,
 		time: firstPoint.time,
 		kind: "start",
@@ -406,14 +411,14 @@ function collectTimelineLabelAnchors(
 		for (let t = firstHour; t < endMs; t += HOUR_MS) {
 			if (t - startMs < MIN_GAP_MS) continue;
 			if (endMs - t < MIN_GAP_MS) continue;
-			const pos = interpolateAtTime(orderedPoints, t);
+			const pos = interpolateAtTime(points, t, exaggeration);
 			if (pos) anchors.push({ ...pos, time: t, kind: "hour" });
 		}
 	}
 
 	anchors.push({
 		x: lastPoint.x,
-		y: lastPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
+		y: lastPoint.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET + 28,
 		z: lastPoint.z,
 		time: lastPoint.time,
 		kind: "end",
@@ -444,24 +449,35 @@ function formatTimelineLabel(
 	return formatIsoDateTime(time, tripBundle?.display.timezone);
 }
 
-function buildTrackTimelineLabels(segments: TripTrackSegment[]) {
+function buildTrackTimelineLabels(
+	segments: TripTrackSegment[],
+	exaggeration: number,
+) {
 	clearTrackTimelineLabels();
 
-	for (const anchor of collectTimelineLabelAnchors(segments)) {
-		const text = formatTimelineLabel(anchor.time, anchor.kind);
-		if (!text) continue;
+	for (const segment of segments) {
+		for (const anchor of collectTimelineLabelAnchors(
+			segment.points,
+			exaggeration,
+		)) {
+			const text = formatTimelineLabel(anchor.time, anchor.kind);
+			if (!text) continue;
 
-		const element = document.createElement("div");
-		element.className = "trip-track-label";
-		element.textContent = text;
-		element.hidden = true;
-		viewerOverlay.append(element);
-		trackTimelineLabels.push({
-			x: anchor.x,
-			y: anchor.y,
-			z: anchor.z,
-			element,
-		});
+			const element = document.createElement("div");
+			element.className = "trip-track-label";
+			element.textContent = text;
+			element.hidden = true;
+			viewerOverlay.append(element);
+
+			const anchorObject = new THREE.Object3D();
+			anchorObject.position.set(anchor.x, anchor.y, anchor.z);
+			scene.add(anchorObject);
+
+			trackTimelineLabels.push({
+				anchor: anchorObject,
+				element,
+			});
+		}
 	}
 }
 
@@ -473,65 +489,24 @@ function updateTrackTimelineLabels() {
 	if (!width || !height) return;
 
 	for (const label of trackTimelineLabels) {
-		labelWorldPos.set(label.x, label.y, label.z);
-		const projected = labelWorldPos.clone().project(camera);
+		label.anchor.getWorldPosition(labelWorldPos);
+		labelProjectedPos.copy(labelWorldPos).project(camera);
 
 		const inFrustum =
-			projected.z >= -1 &&
-			projected.z <= 1 &&
-			projected.x >= -1.08 &&
-			projected.x <= 1.08 &&
-			projected.y >= -1.08 &&
-			projected.y <= 1.08;
+			labelProjectedPos.z >= -1 &&
+			labelProjectedPos.z <= 1 &&
+			labelProjectedPos.x >= -1.08 &&
+			labelProjectedPos.x <= 1.08 &&
+			labelProjectedPos.y >= -1.08 &&
+			labelProjectedPos.y <= 1.08;
 
-		let visible = inFrustum;
-		if (visible && terrainRuntime) {
-			const { metadata, heights } = terrainRuntime;
-			const exaggeration = terrainRuntime.currentExaggeration;
-			const gridW = metadata.width;
-			const gridH = metadata.height;
-			const halfW = metadata.sizeMeters.width / 2;
-			const halfH = metadata.sizeMeters.height / 2;
-			const STEPS = 12;
-			let occluded = false;
-			for (let s = 1; s < STEPS; s += 1) {
-				const t = s / STEPS;
-				const px =
-					camera.position.x + (labelWorldPos.x - camera.position.x) * t;
-				const py =
-					camera.position.y + (labelWorldPos.y - camera.position.y) * t;
-				const pz =
-					camera.position.z + (labelWorldPos.z - camera.position.z) * t;
-				const gx = ((px + halfW) / (halfW * 2)) * (gridW - 1);
-				const gz = ((pz + halfH) / (halfH * 2)) * (gridH - 1);
-				if (gx < 0 || gx > gridW - 1 || gz < 0 || gz > gridH - 1) continue;
-				// bilinear sample
-				const x0 = Math.floor(gx),
-					x1 = Math.min(gridW - 1, x0 + 1);
-				const z0 = Math.floor(gz),
-					z1 = Math.min(gridH - 1, z0 + 1);
-				const tx = gx - x0,
-					tz = gz - z0;
-				const h00 = heights[z0 * gridW + x0] ?? 0;
-				const h10 = heights[z0 * gridW + x1] ?? 0;
-				const h01 = heights[z1 * gridW + x0] ?? 0;
-				const h11 = heights[z1 * gridW + x1] ?? 0;
-				const terrainH =
-					(h00 * (1 - tx) + h10 * tx) * (1 - tz) +
-					(h01 * (1 - tx) + h11 * tx) * tz;
-				if (py < terrainH * exaggeration) {
-					occluded = true;
-					break;
-				}
-			}
-			visible = !occluded;
-		}
+		const visible = inFrustum;
 
 		label.element.hidden = !visible;
 		if (!visible) continue;
 
-		const screenX = ((projected.x + 1) / 2) * width;
-		const screenY = ((1 - projected.y) / 2) * height;
+		const screenX = ((labelProjectedPos.x + 1) / 2) * width;
+		const screenY = ((1 - labelProjectedPos.y) / 2) * height;
 		label.element.style.transform = `translate(${screenX.toFixed(1)}px, ${screenY.toFixed(1)}px)`;
 	}
 }
