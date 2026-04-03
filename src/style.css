@@ -64,12 +64,45 @@ body {
 	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
+.viewer-shell:fullscreen {
+	min-height: 100vh;
+	border-radius: 0;
+	border: 0;
+}
+
 .viewer {
 	position: absolute;
 	inset: 0;
 	width: 100%;
 	height: 100%;
 	display: block;
+}
+
+.viewer-action-button {
+	position: absolute;
+	top: 1rem;
+	right: 1rem;
+	z-index: 3;
+	appearance: none;
+	border: 1px solid rgba(255, 245, 220, 0.18);
+	border-radius: 999px;
+	padding: 0.75rem 1rem;
+	background: rgba(14, 20, 16, 0.72);
+	backdrop-filter: blur(14px);
+	color: #fff1d0;
+	font: inherit;
+	font-weight: 700;
+	cursor: pointer;
+	transition:
+		background 160ms ease,
+		border-color 160ms ease,
+		transform 160ms ease;
+}
+
+.viewer-action-button:hover {
+	background: rgba(23, 31, 25, 0.82);
+	border-color: rgba(255, 245, 220, 0.28);
+	transform: translateY(-1px);
 }
 
 .viewer-overlay {
@@ -478,5 +511,10 @@ input[type="range"] {
 		right: 0.85rem;
 		bottom: 0.85rem;
 		max-width: none;
+	}
+
+	.viewer-action-button {
+		top: 0.85rem;
+		right: 0.85rem;
 	}
 }

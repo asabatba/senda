@@ -78,6 +78,7 @@ const namedPlacesChecked = signal(true);
 const namedPlaceLegendVisible = signal(false);
 const namedPlaceLegend = signal<NamedPlaceLegendEntry[]>([]);
 const namedPlaceLegendCount = signal(0);
+const fullscreenActive = signal(false);
 
 // ─── Preact components ────────────────────────────────────────────────────────
 
@@ -139,13 +140,20 @@ function App() {
 	return (
 		<div class="layout">
 			<section class="viewer-shell">
+				<button
+					class="viewer-action-button"
+					type="button"
+					onClick={handleFullscreenToggle}
+				>
+					{fullscreenActive.value ? "Exit fullscreen" : "Enter fullscreen"}
+				</button>
 				<canvas class="viewer" aria-label="3D terrain viewer" />
 				<div class="viewer-overlay" />
 				<div class="viewer-hint">
 					<strong>Keyboard</strong>
 					<span>
 						WASD or arrows to move, Q/E or PgUp/PgDn for altitude, Shift to
-						accelerate.
+						accelerate, F for fullscreen.
 					</span>
 				</div>
 			</section>
@@ -295,6 +303,7 @@ function App() {
 // ─── Three.js module-level state ──────────────────────────────────────────────
 
 let canvas!: HTMLCanvasElement;
+let viewerShell!: HTMLElement;
 let viewerOverlay!: HTMLElement;
 let renderer!: THREE.WebGLRenderer;
 let scene!: THREE.Scene;
@@ -344,6 +353,7 @@ function handleTrackToggle(overlay: TrackOverlay) {
 	overlay.visible = !overlay.visible;
 	overlay.object.visible = overlay.visible;
 	trackItems.value = [...trackOverlays];
+	requestRender();
 }
 
 function handleTrackZoom(overlay: TrackOverlay) {
@@ -357,6 +367,26 @@ function handleTrackRemove(overlay: TrackOverlay) {
 		trackOverlays.splice(index, 1);
 		trackItems.value = [...trackOverlays];
 		setTrackFeedback(`Removed ${overlay.name}.`, "info");
+		requestRender();
+	}
+}
+
+async function handleFullscreenToggle() {
+	if (!viewerShell) return;
+
+	try {
+		if (document.fullscreenElement === viewerShell) {
+			await document.exitFullscreen();
+		} else {
+			await viewerShell.requestFullscreen();
+		}
+	} catch (error) {
+		setStatus(
+			error instanceof Error
+				? error.message
+				: "Fullscreen mode could not be changed.",
+			true,
+		);
 	}
 }
 
@@ -393,6 +423,12 @@ function isEditableTarget(target: EventTarget | null) {
 	if (!(target instanceof HTMLElement)) return false;
 	if (target.isContentEditable) return true;
 	return Boolean(target.closest("input, textarea, select, button, label"));
+}
+
+function syncFullscreenState() {
+	fullscreenActive.value = document.fullscreenElement === viewerShell;
+	resizeRenderer();
+	requestRender();
 }
 
 function nextTrackColor() {
@@ -620,6 +656,7 @@ function setNamedPlacesVisible(visible: boolean, persist = true) {
 	if (persist) {
 		persistNamedPlacesVisible(visible);
 	}
+	requestRender();
 }
 
 function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
@@ -639,7 +676,7 @@ function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
 }
 
 function updateKeyboardNavigation(deltaSeconds: number) {
-	if (!terrainRuntime || pressedKeys.size === 0) return;
+	if (!terrainRuntime || pressedKeys.size === 0) return false;
 
 	keyboardForward.subVectors(controls.target, camera.position);
 	keyboardForward.y = 0;
@@ -647,7 +684,7 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 		camera.getWorldDirection(keyboardForward);
 		keyboardForward.y = 0;
 	}
-	if (keyboardForward.lengthSq() < 1e-6) return;
+	if (keyboardForward.lengthSq() < 1e-6) return false;
 
 	keyboardForward.normalize();
 	keyboardRight.crossVectors(keyboardForward, camera.up).normalize();
@@ -666,7 +703,7 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 	if (pressedKeys.has("KeyQ") || pressedKeys.has("PageDown"))
 		keyboardOffset.y -= 1;
 
-	if (keyboardOffset.lengthSq() === 0) return;
+	if (keyboardOffset.lengthSq() === 0) return false;
 
 	const viewDistance = camera.position.distanceTo(controls.target);
 	const terrainSpan = Math.max(
@@ -686,6 +723,7 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 
 	camera.position.add(movement);
 	controls.target.add(movement);
+	return true;
 }
 
 function resizeRenderer() {
@@ -695,6 +733,11 @@ function resizeRenderer() {
 	camera.aspect = clientWidth / clientHeight;
 	camera.updateProjectionMatrix();
 	updateTrackMaterialsResolution();
+}
+
+function requestRender() {
+	if (animationHandle !== 0) return;
+	animationHandle = window.requestAnimationFrame(animate);
 }
 
 async function applyOrthophotoPreset(
@@ -738,6 +781,7 @@ async function applyOrthophotoPreset(
 		setStatus(
 			`Terrain ready. ${formatPresetLabel(presetId)} orthophoto loaded; upload a GPX file to overlay a track.`,
 		);
+		requestRender();
 	} catch (error) {
 		selectedPreset.value = terrainRuntime.currentOrthophotoPreset;
 		setStatus(
@@ -983,13 +1027,14 @@ async function loadTerrain() {
 	setStatus(
 		`Terrain ready. ${formatPresetLabel(currentPreset)} orthophoto and natural-feature overlay loaded; upload a GPX file to overlay a track.`,
 	);
+	requestRender();
 }
 
 function animate() {
+	animationHandle = 0;
 	const deltaSeconds = Math.min(clock.getDelta(), 0.1);
-	animationHandle = window.requestAnimationFrame(animate);
-	updateKeyboardNavigation(deltaSeconds);
-	controls.update();
+	const movedByKeyboard = updateKeyboardNavigation(deltaSeconds);
+	const controlsChanged = controls.update();
 	if (terrainRuntime?.namedPlaceOverlay && terrainRuntime.namedPlacesVisible) {
 		updateNamedPlaceOverlay(
 			terrainRuntime.namedPlaceOverlay,
@@ -999,6 +1044,9 @@ function animate() {
 		);
 	}
 	renderer.render(scene, camera);
+	if (movedByKeyboard || controlsChanged) {
+		requestRender();
+	}
 }
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -1010,6 +1058,7 @@ if (!app) {
 
 render(<App />, app);
 
+viewerShell = app.querySelector<HTMLElement>(".viewer-shell")!;
 canvas = app.querySelector<HTMLCanvasElement>("canvas.viewer")!;
 viewerOverlay = app.querySelector<HTMLElement>(".viewer-overlay")!;
 
@@ -1037,22 +1086,48 @@ const rimLight = new THREE.DirectionalLight(0xb8d4ff, 0.35);
 rimLight.position.set(-4000, 2500, -4500);
 scene.add(rimLight);
 
-const resizeObserver = new ResizeObserver(() => resizeRenderer());
+function handleControlsChange() {
+	requestRender();
+}
+
+controls.addEventListener("change", handleControlsChange);
+
+const resizeObserver = new ResizeObserver(() => {
+	resizeRenderer();
+	requestRender();
+});
 resizeObserver.observe(canvas);
-window.addEventListener("resize", resizeRenderer);
+window.addEventListener("resize", () => {
+	resizeRenderer();
+	requestRender();
+});
 window.addEventListener("keydown", (event) => {
+	if (event.code === "KeyF" && !event.repeat) {
+		if (isEditableTarget(event.target)) return;
+		event.preventDefault();
+		void handleFullscreenToggle();
+		return;
+	}
 	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) return;
 	if (isEditableTarget(event.target)) return;
+	const startingMovement = pressedKeys.size === 0;
 	pressedKeys.add(event.code);
+	if (startingMovement) {
+		clock.getDelta();
+		requestRender();
+	}
 	event.preventDefault();
 });
 window.addEventListener("keyup", (event) => {
 	if (!KEYBOARD_MOVE_CODES.has(event.code)) return;
 	pressedKeys.delete(event.code);
+	requestRender();
 });
 window.addEventListener("blur", () => {
 	pressedKeys.clear();
+	requestRender();
 });
+document.addEventListener("fullscreenchange", syncFullscreenState);
 
 loadTerrain().catch((error) => {
 	setStatus(
@@ -1062,10 +1137,14 @@ loadTerrain().catch((error) => {
 });
 
 resizeRenderer();
-animate();
+requestRender();
 
 window.addEventListener("beforeunload", () => {
-	window.cancelAnimationFrame(animationHandle);
+	if (animationHandle !== 0) {
+		window.cancelAnimationFrame(animationHandle);
+		animationHandle = 0;
+	}
+	controls.removeEventListener("change", handleControlsChange);
 	controls.dispose();
 	renderer.dispose();
 	for (const overlay of trackOverlays) {
@@ -1076,4 +1155,5 @@ window.addEventListener("beforeunload", () => {
 	}
 	const mat = terrainRuntime?.mesh.material;
 	mat?.map?.dispose();
+	document.removeEventListener("fullscreenchange", syncFullscreenState);
 });

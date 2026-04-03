@@ -30,7 +30,10 @@ main();
 
 function main() {
 	const repoRoot = process.cwd();
-	const options = parseArgs(process.argv.slice(2));
+	const options = expandInputDirOptions(
+		parseArgs(process.argv.slice(2)),
+		repoRoot,
+	);
 	validateInputs(options);
 
 	const terrain = loadTerrainDataset(repoRoot);
@@ -126,9 +129,11 @@ function main() {
 
 function parseArgs(args) {
 	const options = {
+		inputDirs: [],
 		gpx: [],
 		images: [],
 		csv: null,
+		csvExplicit: false,
 		outDir: DEFAULT_OUT_DIR,
 		clusterDistance: DEFAULT_CLUSTER_DISTANCE,
 		cardHeight: DEFAULT_CARD_HEIGHT,
@@ -140,6 +145,11 @@ function parseArgs(args) {
 	for (let index = 0; index < args.length; index += 1) {
 		const token = args[index];
 		const value = args[index + 1];
+		if (token === "--input-dir") {
+			options.inputDirs.push(assertValue(token, value));
+			index += 1;
+			continue;
+		}
 		if (token === "--gpx") {
 			options.gpx.push(assertValue(token, value));
 			index += 1;
@@ -152,6 +162,7 @@ function parseArgs(args) {
 		}
 		if (token === "--csv") {
 			options.csv = assertValue(token, value);
+			options.csvExplicit = true;
 			index += 1;
 			continue;
 		}
@@ -188,7 +199,8 @@ function parseArgs(args) {
 		if (token === "--help" || token === "-h") {
 			process.stdout.write(
 				[
-					"Usage: pnpm trip:build --gpx file.gpx [--gpx file2.gpx] [--images path|glob] [--csv manifest.csv]",
+					"Usage: pnpm trip:build --input-dir trip-folder [--csv manifest.csv]",
+					"\tor: pnpm trip:build --gpx file.gpx [--gpx file2.gpx] [--images path|glob] [--csv manifest.csv]",
 					"\t[--out-dir .trip-export] [--cluster-distance 60] [--card-height 280] [--track-padding-meters 1000]",
 					"\t[--timezone Europe/Madrid] [--image-time-hour-correction 0]  (can be combined: timezone interprets naive EXIF/CSV times, hour-correction then shifts by N hours)",
 				].join("\n") + "\n",
@@ -196,6 +208,77 @@ function parseArgs(args) {
 			process.exit(0);
 		}
 		throw new Error(`Unknown argument ${token}.`);
+	}
+
+	return options;
+}
+
+function expandInputDirOptions(options, repoRoot) {
+	if (options.inputDirs.length === 0) {
+		return options;
+	}
+
+	const discoveredGpx = new Map(
+		options.gpx.map((value) => {
+			const resolved = resolve(repoRoot, value);
+			return [normalizeLookupKey(resolved), value];
+		}),
+	);
+	const discoveredImages = new Map(
+		options.images.map((value) => [normalizeLookupKey(value), value]),
+	);
+	const discoveredCsv = [];
+
+	for (const inputDir of options.inputDirs) {
+		const resolvedDir = resolve(repoRoot, inputDir);
+		if (!existsSync(resolvedDir) || !statSync(resolvedDir).isDirectory()) {
+			throw new Error(`--input-dir "${inputDir}" is not a readable directory.`);
+		}
+
+		let gpxCount = 0;
+		for (const filePath of walkFiles(resolvedDir)) {
+			const extension = extname(filePath).toLowerCase();
+			if (extension === ".gpx") {
+				const key = normalizeLookupKey(filePath);
+				if (!discoveredGpx.has(key)) {
+					discoveredGpx.set(key, relative(repoRoot, filePath));
+				}
+				gpxCount += 1;
+				continue;
+			}
+			if (extension === ".csv") {
+				discoveredCsv.push(filePath);
+			}
+		}
+
+		if (gpxCount === 0) {
+			throw new Error(
+				`--input-dir "${inputDir}" does not contain any .gpx files.`,
+			);
+		}
+
+		const imagePattern = relative(repoRoot, resolvedDir) || ".";
+		discoveredImages.set(normalizeLookupKey(imagePattern), imagePattern);
+	}
+
+	options.gpx = Array.from(discoveredGpx.values()).sort();
+	options.images = Array.from(discoveredImages.values());
+
+	if (!options.csvExplicit) {
+		const uniqueCsv = Array.from(
+			new Map(
+				discoveredCsv.map((value) => [normalizeLookupKey(value), value]),
+			).values(),
+		).sort();
+		if (uniqueCsv.length === 1) {
+			options.csv = relative(repoRoot, uniqueCsv[0]);
+		} else if (uniqueCsv.length > 1) {
+			throw new Error(
+				`Multiple CSV manifests were found under --input-dir: ${uniqueCsv
+					.map((value) => relative(repoRoot, value))
+					.join(", ")}. Use --csv to choose one explicitly.`,
+			);
+		}
 	}
 
 	return options;
@@ -226,7 +309,11 @@ function parseNumber(flag, value) {
 
 function validateInputs(options) {
 	if (options.gpx.length === 0) {
-		throw new Error("At least one --gpx file is required.");
+		throw new Error(
+			options.inputDirs.length > 0
+				? "No GPX files were discovered from the provided --input-dir values."
+				: "At least one --gpx file is required.",
+		);
 	}
 	if (options.timezone) {
 		try {
@@ -1734,6 +1821,9 @@ function walkFiles(rootDir) {
 	const results = [];
 	const entries = readdirSync(rootDir, { withFileTypes: true });
 	for (const entry of entries) {
+		if (entry.name === ".git" || entry.name === "node_modules") {
+			continue;
+		}
 		const entryPath = join(rootDir, entry.name);
 		if (entry.isDirectory()) {
 			results.push(...walkFiles(entryPath));

@@ -105,6 +105,10 @@ const tripStats = signal<TripBundle["stats"] | null>(null);
 const tripClusters = signal<TripCluster[]>([]);
 const tripPhotoAnchors = signal<TripPhotoAnchor[]>([]);
 const resetVisible = signal(false);
+const fullscreenActive = signal(false);
+const tripHintVisible = signal(true);
+
+const TRIP_HINT_AUTO_HIDE_MS = 8000;
 
 // ─── Preact components ────────────────────────────────────────────────────────
 
@@ -132,18 +136,32 @@ function App() {
 	return (
 		<div class="trip-layout">
 			<section class="trip-viewer-shell">
+				<button
+					class="trip-viewer-action-button"
+					type="button"
+					onClick={handleFullscreenToggle}
+				>
+					{fullscreenActive.value ? "Exit fullscreen" : "Enter fullscreen"}
+				</button>
 				<canvas
 					class="trip-viewer"
 					aria-label="Trip scene export"
 					tabIndex={0}
 				/>
 				<div class="trip-viewer-overlay" />
-				<div class="trip-viewer-hint">
+				<div
+					class={
+						tripHintVisible.value
+							? "trip-viewer-hint"
+							: "trip-viewer-hint trip-viewer-hint-hidden"
+					}
+					aria-hidden={!tripHintVisible.value}
+				>
 					<strong>Trip Scene</strong>
 					<span>
 						Mouse or touch to inspect the route. Focus the scene then use
 						WASD/arrows to pan, Q/E for altitude, Shift to accelerate, +/- to
-						zoom, R to reset.
+						zoom, R to reset, F for fullscreen.
 					</span>
 				</div>
 			</section>
@@ -207,6 +225,7 @@ function App() {
 // ─── Three.js module-level state ──────────────────────────────────────────────
 
 let canvas!: HTMLCanvasElement;
+let viewerShell!: HTMLElement;
 let viewerOverlay!: HTMLElement;
 let renderer!: THREE.WebGLRenderer;
 let scene!: THREE.Scene;
@@ -220,6 +239,7 @@ const trackTimelineLabels: TrackTimelineLabel[] = [];
 let terrainRuntime: TerrainRuntime | null = null;
 let tripBundle: TripBundle | null = null;
 let animationHandle = 0;
+let tripHintHideHandle = 0;
 
 const KEYBOARD_ZOOM_FACTOR = 1.16;
 
@@ -239,6 +259,27 @@ function handleResetCamera() {
 	}
 }
 
+function dismissTripHint() {
+	if (!tripHintVisible.value) {
+		return;
+	}
+	tripHintVisible.value = false;
+	if (tripHintHideHandle) {
+		window.clearTimeout(tripHintHideHandle);
+		tripHintHideHandle = 0;
+	}
+}
+
+function scheduleTripHintDismiss() {
+	if (tripHintHideHandle) {
+		window.clearTimeout(tripHintHideHandle);
+	}
+	tripHintHideHandle = window.setTimeout(() => {
+		tripHintVisible.value = false;
+		tripHintHideHandle = 0;
+	}, TRIP_HINT_AUTO_HIDE_MS);
+}
+
 function zoomToCluster(cluster: TripCluster) {
 	controls.target.set(
 		cluster.x,
@@ -253,6 +294,25 @@ function zoomToCluster(cluster: TripCluster) {
 		cluster.z + 260,
 	);
 	controls.update();
+}
+
+async function handleFullscreenToggle() {
+	if (!viewerShell) return;
+
+	try {
+		if (document.fullscreenElement === viewerShell) {
+			await document.exitFullscreen();
+		} else {
+			await viewerShell.requestFullscreen();
+		}
+	} catch (error) {
+		setStatus(
+			error instanceof Error
+				? error.message
+				: "Fullscreen mode could not be changed.",
+			true,
+		);
+	}
 }
 
 // ─── Utility functions ────────────────────────────────────────────────────────
@@ -273,6 +333,12 @@ function resizeRenderer() {
 	for (const line of trackLines) {
 		line.material.resolution.set(clientWidth, clientHeight);
 	}
+}
+
+function syncFullscreenState() {
+	fullscreenActive.value = document.fullscreenElement === viewerShell;
+	resizeRenderer();
+	requestRender();
 }
 
 function buildTrackPositions(points: TripTrackPoint[], exaggeration: number) {
@@ -858,7 +924,7 @@ function zoomCamera(scale: number) {
 
 function updateKeyboardNavigation(deltaSeconds: number) {
 	if (!terrainRuntime || pressedKeys.size === 0) {
-		return;
+		return false;
 	}
 
 	keyboardForward.subVectors(controls.target, camera.position);
@@ -868,7 +934,7 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 		keyboardForward.y = 0;
 	}
 	if (keyboardForward.lengthSq() < 1e-6) {
-		return;
+		return false;
 	}
 
 	keyboardForward.normalize();
@@ -895,7 +961,7 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 	}
 
 	if (keyboardOffset.lengthSq() === 0) {
-		return;
+		return false;
 	}
 
 	const viewDistance = camera.position.distanceTo(controls.target);
@@ -916,6 +982,14 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 
 	camera.position.add(movement);
 	controls.target.add(movement);
+	return true;
+}
+
+function requestRender() {
+	if (animationHandle !== 0) {
+		return;
+	}
+	animationHandle = window.requestAnimationFrame(animate);
 }
 
 function handleViewerKeyboard(event: KeyboardEvent) {
@@ -927,7 +1001,14 @@ function handleViewerKeyboard(event: KeyboardEvent) {
 		return;
 	}
 
+	dismissTripHint();
+
 	switch (event.key) {
+		case "f":
+		case "F":
+			event.preventDefault();
+			void handleFullscreenToggle();
+			return;
 		case "+":
 		case "=":
 			event.preventDefault();
@@ -1073,15 +1154,20 @@ async function loadTerrainAndTrip() {
 	focusScene(metadata);
 	resizeRenderer();
 	setStatus("Trip scene ready.");
+	scheduleTripHintDismiss();
+	requestRender();
 }
 
 function animate() {
+	animationHandle = 0;
 	const deltaSeconds = Math.min(clock.getDelta(), 0.1);
-	animationHandle = window.requestAnimationFrame(animate);
-	updateKeyboardNavigation(deltaSeconds);
-	controls.update();
+	const movedByKeyboard = updateKeyboardNavigation(deltaSeconds);
+	const controlsChanged = controls.update();
 	updateTrackTimelineLabels();
 	renderer.render(scene, camera);
+	if (movedByKeyboard || controlsChanged) {
+		requestRender();
+	}
 }
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -1093,6 +1179,7 @@ if (!app) {
 
 render(<App />, app);
 
+viewerShell = app.querySelector<HTMLElement>(".trip-viewer-shell")!;
 canvas = app.querySelector<HTMLCanvasElement>(".trip-viewer")!;
 viewerOverlay = app.querySelector<HTMLElement>(".trip-viewer-overlay")!;
 
@@ -1120,9 +1207,16 @@ const fillLight = new THREE.DirectionalLight(0xb9d5ff, 0.45);
 fillLight.position.set(-4000, 3600, -4600);
 scene.add(fillLight);
 
+function handleControlsChange() {
+	requestRender();
+}
+
+controls.addEventListener("change", handleControlsChange);
+
 canvas.addEventListener("keydown", handleViewerKeyboard);
 canvas.addEventListener("pointerdown", () => {
 	canvas.focus({ preventScroll: true });
+	dismissTripHint();
 });
 window.addEventListener("keydown", (event) => {
 	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) {
@@ -1131,19 +1225,34 @@ window.addEventListener("keydown", (event) => {
 	if (document.activeElement !== canvas) {
 		return;
 	}
+	const startingMovement = pressedKeys.size === 0;
+	dismissTripHint();
 	pressedKeys.add(event.code);
+	if (startingMovement) {
+		clock.getDelta();
+		requestRender();
+	}
 	event.preventDefault();
 });
 window.addEventListener("keyup", (event) => {
 	pressedKeys.delete(event.code);
+	requestRender();
 });
 window.addEventListener("blur", () => {
 	pressedKeys.clear();
+	requestRender();
 });
+document.addEventListener("fullscreenchange", syncFullscreenState);
 
-const resizeObserver = new ResizeObserver(() => resizeRenderer());
+const resizeObserver = new ResizeObserver(() => {
+	resizeRenderer();
+	requestRender();
+});
 resizeObserver.observe(canvas);
-window.addEventListener("resize", resizeRenderer);
+window.addEventListener("resize", () => {
+	resizeRenderer();
+	requestRender();
+});
 
 loadTerrainAndTrip().catch((error) => {
 	setStatus(
@@ -1153,10 +1262,17 @@ loadTerrainAndTrip().catch((error) => {
 });
 
 resizeRenderer();
-animate();
+requestRender();
 
 window.addEventListener("beforeunload", () => {
-	window.cancelAnimationFrame(animationHandle);
+	if (animationHandle !== 0) {
+		window.cancelAnimationFrame(animationHandle);
+		animationHandle = 0;
+	}
+	if (tripHintHideHandle) {
+		window.clearTimeout(tripHintHideHandle);
+	}
+	controls.removeEventListener("change", handleControlsChange);
 	controls.dispose();
 	renderer.dispose();
 	for (const line of trackLines) {
@@ -1170,4 +1286,5 @@ window.addEventListener("beforeunload", () => {
 	terrainRuntime?.mesh.material.map?.dispose();
 	terrainRuntime?.mesh.material.dispose();
 	terrainRuntime?.geometry.dispose();
+	document.removeEventListener("fullscreenchange", syncFullscreenState);
 });

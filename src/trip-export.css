@@ -54,6 +54,12 @@ body {
 		linear-gradient(180deg, #bdd7e8 0%, #f7ecd7 34%, #9a8b6f 100%);
 }
 
+.trip-viewer-shell:fullscreen {
+	min-height: 100vh;
+	border-radius: 0;
+	border: 0;
+}
+
 .trip-viewer {
 	position: absolute;
 	inset: 0;
@@ -65,6 +71,33 @@ body {
 .trip-viewer:focus-visible {
 	outline: 3px solid rgba(255, 236, 192, 0.9);
 	outline-offset: -3px;
+}
+
+.trip-viewer-action-button {
+	position: absolute;
+	top: 1rem;
+	right: 1rem;
+	z-index: 3;
+	appearance: none;
+	border: 1px solid rgba(255, 244, 219, 0.18);
+	border-radius: 999px;
+	padding: 0.75rem 1rem;
+	background: rgba(11, 18, 21, 0.72);
+	backdrop-filter: blur(14px);
+	color: #fff3d3;
+	font: inherit;
+	font-weight: 700;
+	cursor: pointer;
+	transition:
+		background 160ms ease,
+		border-color 160ms ease,
+		transform 160ms ease;
+}
+
+.trip-viewer-action-button:hover {
+	background: rgba(18, 28, 33, 0.82);
+	border-color: rgba(255, 244, 219, 0.28);
+	transform: translateY(-1px);
 }
 
 .trip-viewer-overlay {
@@ -104,6 +137,17 @@ body {
 	background: rgba(11, 18, 21, 0.56);
 	border: 1px solid rgba(255, 244, 219, 0.14);
 	backdrop-filter: blur(14px);
+	opacity: 1;
+	transform: translateY(0);
+	transition:
+		opacity 320ms ease,
+		transform 320ms ease;
+}
+
+.trip-viewer-hint-hidden {
+	opacity: 0;
+	transform: translateY(10px);
+	pointer-events: none;
 }
 
 .trip-viewer-hint strong {
@@ -261,5 +305,10 @@ body {
 
 	.trip-viewer-shell {
 		min-height: 58vh;
+	}
+
+	.trip-viewer-action-button {
+		top: 0.85rem;
+		right: 0.85rem;
 	}
 }

@@ -38,6 +38,12 @@ pnpm terrain:build
 Create a standalone trip export:
 
 ```bash
+pnpm trip:build --input-dir data/my-trip
+```
+
+Advanced export inputs remain available when you need to override discovery:
+
+```bash
 pnpm trip:build --gpx path/to/track.gpx --images "path/to/images/*"
 ```
 
