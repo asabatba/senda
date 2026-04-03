@@ -24,6 +24,7 @@ const DEFAULT_OUT_DIR = ".trip-export";
 const DEFAULT_CLUSTER_DISTANCE = 100;
 const DEFAULT_CARD_HEIGHT = 280;
 const DEFAULT_TRACK_PADDING_METERS = 2000;
+const PHOTO_CLUSTER_INSTANT_SPREAD_MS = 5 * 60 * 1000;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".avif"]);
 
 main();
@@ -923,16 +924,7 @@ function placeImages(images, csvEntries, lookup, terrain, timeOptions) {
 	}
 
 	anchors.sort((left, right) => {
-		const leftTime = left.captureTime
-			? Date.parse(left.captureTime)
-			: Number.POSITIVE_INFINITY;
-		const rightTime = right.captureTime
-			? Date.parse(right.captureTime)
-			: Number.POSITIVE_INFINITY;
-		if (leftTime !== rightTime) {
-			return leftTime - rightTime;
-		}
-		return left.sourceLabel.localeCompare(right.sourceLabel);
+		return compareAnchorsByTime(left, right);
 	});
 	return { anchors, unplaced };
 }
@@ -1073,14 +1065,21 @@ function clusterAnchors(placementResult, clusterDistance, baseCardHeight) {
 		anchor.clusterId = cluster.id;
 	}
 
+	const anchorById = new Map(anchors.map((anchor) => [anchor.id, anchor]));
+
 	for (const cluster of clusters) {
+		const members = cluster.memberIds
+			.map((id) => anchorById.get(id))
+			.filter(Boolean);
 		cluster.cardHeight =
 			baseCardHeight + Math.max(cluster.memberIds.length - 1, 0) * 42;
 		cluster.memberIds.sort((leftId, rightId) => {
-			const left = anchors.find((entry) => entry.id === leftId);
-			const right = anchors.find((entry) => entry.id === rightId);
-			return (left?.sourceLabel ?? "").localeCompare(right?.sourceLabel ?? "");
+			const left = anchorById.get(leftId);
+			const right = anchorById.get(rightId);
+			if (!left || !right) return 0;
+			return compareAnchorsByTime(left, right);
 		});
+		cluster.timeLabel = buildClusterTimeLabel(members);
 	}
 
 	return {
@@ -1157,7 +1156,52 @@ function buildTripBundle(
 			terrainHeight: cluster.terrainHeight,
 			cardHeight: cluster.cardHeight,
 			memberIds: cluster.memberIds,
+			timeLabel: cluster.timeLabel,
 		})),
+	};
+}
+
+function compareAnchorsByTime(left, right) {
+	const leftTime = left.captureTime
+		? Date.parse(left.captureTime)
+		: Number.POSITIVE_INFINITY;
+	const rightTime = right.captureTime
+		? Date.parse(right.captureTime)
+		: Number.POSITIVE_INFINITY;
+	if (leftTime !== rightTime) {
+		return leftTime - rightTime;
+	}
+	return left.sourceLabel.localeCompare(right.sourceLabel);
+}
+
+function buildClusterTimeLabel(members) {
+	const validTimes = members
+		.map((member) => member.captureTime)
+		.filter((value) => typeof value === "string" && value.length > 0)
+		.map((value) => Date.parse(value))
+		.filter((value) => !Number.isNaN(value))
+		.sort((a, b) => a - b);
+
+	if (validTimes.length === 0) {
+		return null;
+	}
+
+	const startTime = validTimes[0];
+	const endTime = validTimes[validTimes.length - 1];
+	if (endTime - startTime <= PHOTO_CLUSTER_INSTANT_SPREAD_MS) {
+		const averageTime =
+			validTimes.reduce((sum, value) => sum + value, 0) / validTimes.length;
+		return {
+			kind: "instant",
+			startTime: new Date(Math.round(averageTime)).toISOString(),
+			endTime: null,
+		};
+	}
+
+	return {
+		kind: "range",
+		startTime: new Date(startTime).toISOString(),
+		endTime: new Date(endTime).toISOString(),
 	};
 }
 

@@ -50,6 +50,18 @@ type TripPhotoAnchor = {
 	terrainHeight: number;
 };
 
+type TripClusterTimeLabel =
+	| {
+			kind: "instant";
+			startTime: string;
+			endTime: null;
+	  }
+	| {
+			kind: "range";
+			startTime: string;
+			endTime: string;
+	  };
+
 type TripCluster = {
 	id: string;
 	x: number;
@@ -57,6 +69,7 @@ type TripCluster = {
 	terrainHeight: number;
 	cardHeight: number;
 	memberIds: string[];
+	timeLabel: TripClusterTimeLabel | null;
 };
 
 type TripBundle = {
@@ -107,6 +120,8 @@ const tripPhotoAnchors = signal<TripPhotoAnchor[]>([]);
 const resetVisible = signal(false);
 const fullscreenActive = signal(false);
 const tripHintVisible = signal(true);
+const galleryPhotos = signal<TripPhotoAnchor[]>([]);
+const galleryIndex = signal(-1);
 
 const TRIP_HINT_AUTO_HIDE_MS = 8000;
 
@@ -133,92 +148,155 @@ function ClusterItem({ cluster }: { cluster: TripCluster }) {
 }
 
 function App() {
+	const galleryOpen = galleryIndex.value >= 0;
+	const photo = galleryOpen
+		? galleryPhotos.value[galleryIndex.value] ?? null
+		: null;
+	const photoCount = galleryPhotos.value.length;
+	const photoDateLabel = photo
+		? formatExactDateTime(photo.captureTime)
+		: "Unknown capture time";
+
 	return (
-		<div class="trip-layout">
-			<section class="trip-viewer-shell">
-				<button
-					class="trip-viewer-action-button"
-					type="button"
-					onClick={handleFullscreenToggle}
-				>
-					{fullscreenActive.value ? "Exit fullscreen" : "Enter fullscreen"}
-				</button>
-				<canvas
-					class="trip-viewer"
-					aria-label="Trip scene export"
-					tabIndex={0}
-				/>
-				<div class="trip-viewer-overlay" />
-				<div
-					class={
-						tripHintVisible.value
-							? "trip-viewer-hint"
-							: "trip-viewer-hint trip-viewer-hint-hidden"
-					}
-					aria-hidden={!tripHintVisible.value}
-				>
-					<strong>Trip Scene</strong>
-					<span>
-						Mouse or touch to inspect the route. Focus the scene then use
-						WASD/arrows to pan, Q/E for altitude, Shift to accelerate, +/- to
-						zoom, R to reset, F for fullscreen.
-					</span>
-				</div>
-			</section>
-			<aside class="trip-panel">
-				<p class="trip-eyebrow">Standalone Export</p>
-				<h1 class="trip-title">Trip Scene</h1>
-				<p class="trip-lede">
-					Terrain, orthophoto, route line, and photo clusters are prepacked into
-					this self-contained scene.
-				</p>
-				<p
-					class={
-						statusError.value ? "trip-status trip-status-error" : "trip-status"
-					}
-				>
-					{statusMsg.value}
-				</p>
-				{tripStats.value && (
-					<dl class="trip-stats">
-						<div>
-							<dt>Tracks</dt>
-							<dd>{tripStats.value.trackCount}</dd>
-						</div>
-						<div>
-							<dt>Photos</dt>
-							<dd>{tripStats.value.imageCount}</dd>
-						</div>
-						<div>
-							<dt>Clusters</dt>
-							<dd>{tripStats.value.clusterCount}</dd>
-						</div>
-					</dl>
-				)}
-				{tripClusters.value.length > 0 && (
-					<section class="trip-cluster-section">
-						<div class="trip-cluster-header">
-							<span>Photo Clusters</span>
-							<strong>{tripClusters.value.length}</strong>
-						</div>
-						<ul class="trip-cluster-list">
-							{tripClusters.value.map((cluster) => (
-								<ClusterItem key={cluster.id} cluster={cluster} />
-							))}
-						</ul>
-					</section>
-				)}
-				{resetVisible.value && (
+		<>
+			<div class="trip-layout">
+				<section class="trip-viewer-shell">
 					<button
-						class="trip-reset-button"
+						class="trip-viewer-action-button"
 						type="button"
-						onClick={handleResetCamera}
+						onClick={handleFullscreenToggle}
 					>
-						Reset camera
+						{fullscreenActive.value ? "Exit fullscreen" : "Enter fullscreen"}
 					</button>
-				)}
-			</aside>
-		</div>
+					<canvas
+						class="trip-viewer"
+						aria-label="Trip scene export"
+						tabIndex={0}
+					/>
+					<div class="trip-viewer-overlay" />
+					<div
+						class={
+							tripHintVisible.value
+								? "trip-viewer-hint"
+								: "trip-viewer-hint trip-viewer-hint-hidden"
+						}
+						aria-hidden={!tripHintVisible.value}
+					>
+						<strong>Trip Scene</strong>
+						<span>
+							Mouse or touch to inspect the route. Focus the scene then use
+							WASD/arrows to pan, Q/E for altitude, Shift to accelerate, +/- to
+							zoom, R to reset, F for fullscreen.
+						</span>
+					</div>
+				</section>
+				<aside class="trip-panel">
+					<p class="trip-eyebrow">Standalone Export</p>
+					<h1 class="trip-title">Trip Scene</h1>
+					<p class="trip-lede">
+						Terrain, orthophoto, route line, and photo clusters are prepacked into
+						this self-contained scene.
+					</p>
+					<p
+						class={
+							statusError.value ? "trip-status trip-status-error" : "trip-status"
+						}
+					>
+						{statusMsg.value}
+					</p>
+					{tripStats.value && (
+						<dl class="trip-stats">
+							<div>
+								<dt>Tracks</dt>
+								<dd>{tripStats.value.trackCount}</dd>
+							</div>
+							<div>
+								<dt>Photos</dt>
+								<dd>{tripStats.value.imageCount}</dd>
+							</div>
+							<div>
+								<dt>Clusters</dt>
+								<dd>{tripStats.value.clusterCount}</dd>
+							</div>
+						</dl>
+					)}
+					{tripClusters.value.length > 0 && (
+						<section class="trip-cluster-section">
+							<div class="trip-cluster-header">
+								<span>Photo Clusters</span>
+								<strong>{tripClusters.value.length}</strong>
+							</div>
+							<ul class="trip-cluster-list">
+								{tripClusters.value.map((cluster) => (
+									<ClusterItem key={cluster.id} cluster={cluster} />
+								))}
+							</ul>
+						</section>
+					)}
+					{resetVisible.value && (
+						<button
+							class="trip-reset-button"
+							type="button"
+							onClick={handleResetCamera}
+						>
+							Reset camera
+						</button>
+					)}
+				</aside>
+			</div>
+			{photo && (
+				<div
+					class="trip-gallery"
+					role="dialog"
+					aria-modal="true"
+					aria-label="Photo gallery"
+					onClick={closeGallery}
+					onWheel={handleGalleryWheel}
+				>
+					<div class="trip-gallery-shell" onClick={(event) => event.stopPropagation()}>
+						<button
+							class="trip-gallery-close"
+							type="button"
+							onClick={closeGallery}
+							aria-label="Close gallery"
+						>
+							Close
+						</button>
+						<button
+							class="trip-gallery-nav trip-gallery-nav-prev"
+							type="button"
+							onClick={() => stepGallery(-1)}
+							aria-label="Previous image"
+						>
+							Prev
+						</button>
+						<button
+							class="trip-gallery-nav trip-gallery-nav-next"
+							type="button"
+							onClick={() => stepGallery(1)}
+							aria-label="Next image"
+						>
+							Next
+						</button>
+						<div class="trip-gallery-media">
+							<img
+								class="trip-gallery-image"
+								src={photo.imageUrl}
+								alt={photo.description ?? photo.sourceLabel}
+							/>
+						</div>
+						<div class="trip-gallery-meta">
+							<div class="trip-gallery-count">
+								{galleryIndex.value + 1} / {photoCount}
+							</div>
+							<h2>{photo.description ?? photo.sourceLabel}</h2>
+							<p>{photo.sourceLabel}</p>
+							<p>{photoDateLabel}</p>
+						</div>
+					</div>
+				</div>
+			)}
+		</>
 	);
 }
 
@@ -234,14 +312,21 @@ let controls!: OrbitControls;
 
 const trackLines: Line2[] = [];
 const clusterObjects: THREE.Object3D[] = [];
+const photoSprites: THREE.Sprite[] = [];
 const trackTimelineLabels: TrackTimelineLabel[] = [];
 
 let terrainRuntime: TerrainRuntime | null = null;
 let tripBundle: TripBundle | null = null;
 let animationHandle = 0;
 let tripHintHideHandle = 0;
+let pointerDownClientX = 0;
+let pointerDownClientY = 0;
+let pointerDownActive = false;
+let lastGalleryWheelAt = 0;
 
 const KEYBOARD_ZOOM_FACTOR = 1.16;
+const GALLERY_WHEEL_COOLDOWN_MS = 180;
+const CLICK_DRAG_THRESHOLD_PX = 8;
 
 const clock = new THREE.Clock();
 const pressedKeys = new Set<string>();
@@ -250,6 +335,8 @@ const keyboardRight = new THREE.Vector3();
 const keyboardOffset = new THREE.Vector3();
 const labelWorldPos = new THREE.Vector3();
 const labelProjectedPos = new THREE.Vector3();
+const pointerNdc = new THREE.Vector2();
+const raycaster = new THREE.Raycaster();
 
 // ─── UI callbacks (used in components) ────────────────────────────────────────
 
@@ -278,6 +365,49 @@ function scheduleTripHintDismiss() {
 		tripHintVisible.value = false;
 		tripHintHideHandle = 0;
 	}, TRIP_HINT_AUTO_HIDE_MS);
+}
+
+function openGalleryAt(index: number) {
+	const photos = galleryPhotos.value;
+	if (photos.length === 0) return;
+	const normalizedIndex = ((index % photos.length) + photos.length) % photos.length;
+	galleryIndex.value = normalizedIndex;
+	controls.enabled = false;
+	dismissTripHint();
+	requestRender();
+}
+
+function openGalleryForPhoto(photoId: string) {
+	const index = galleryPhotos.value.findIndex((photo) => photo.id === photoId);
+	if (index >= 0) {
+		openGalleryAt(index);
+	}
+}
+
+function closeGallery() {
+	if (galleryIndex.value < 0) return;
+	galleryIndex.value = -1;
+	controls.enabled = true;
+	requestRender();
+}
+
+function stepGallery(direction: number) {
+	if (galleryIndex.value < 0) return;
+	openGalleryAt(galleryIndex.value + direction);
+}
+
+function handleGalleryWheel(event: WheelEvent) {
+	if (galleryIndex.value < 0) return;
+	event.preventDefault();
+	event.stopPropagation();
+	const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX)
+		? event.deltaY
+		: event.deltaX;
+	if (Math.abs(delta) < 12) return;
+	const now = Date.now();
+	if (now - lastGalleryWheelAt < GALLERY_WHEEL_COOLDOWN_MS) return;
+	lastGalleryWheelAt = now;
+	stepGallery(delta > 0 ? 1 : -1);
 }
 
 function zoomToCluster(cluster: TripCluster) {
@@ -452,7 +582,7 @@ type TimelineAnchor = {
 	y: number;
 	z: number;
 	time: number | null;
-	kind: "start" | "end" | "hour" | "photo";
+	kind: "start" | "end" | "hour";
 };
 
 type TimelineLabelCandidate = {
@@ -513,24 +643,61 @@ function formatTimelineLabel(
 	kind: TimelineAnchor["kind"],
 ): string | null {
 	if (time === null) return null;
-	if (kind !== "start" && kind !== "end") {
-		const timezone = tripBundle?.display.timezone;
-		if (timezone) {
-			const parts = new Intl.DateTimeFormat("en-US", {
-				timeZone: timezone,
-				hour: "2-digit",
-				minute: "2-digit",
-				hour12: false,
-			}).formatToParts(new Date(time));
-			const h = parts.find((p) => p.type === "hour")?.value ?? "00";
-
-			const m = parts.find((p) => p.type === "minute")?.value ?? "00";
-
-			return `${h}:${m}`;
-		}
-		return new Date(time).toISOString().slice(11, 16);
+	if (kind === "hour") {
+		return formatClockTime(time);
 	}
 	return formatIsoDateTime(time, tripBundle?.display.timezone);
+}
+
+function formatClockTime(value: number | string | null) {
+	if (value === null) return null;
+	const parsed = typeof value === "number" ? value : Date.parse(value);
+	if (Number.isNaN(parsed)) return null;
+	const timezone = tripBundle?.display.timezone;
+	if (timezone) {
+		const parts = new Intl.DateTimeFormat("en-US", {
+			timeZone: timezone,
+			hour: "2-digit",
+			minute: "2-digit",
+			hour12: false,
+		}).formatToParts(new Date(parsed));
+		const h = parts.find((p) => p.type === "hour")?.value ?? "00";
+		const m = parts.find((p) => p.type === "minute")?.value ?? "00";
+		return `${h}:${m}`;
+	}
+	return new Date(parsed).toISOString().slice(11, 16);
+}
+
+function formatClusterTimeLabel(label: TripClusterTimeLabel | null) {
+	if (!label) return null;
+	const startText = formatClockTime(label.startTime);
+	if (!startText) return null;
+	if (label.kind === "instant" || !label.endTime) {
+		return startText;
+	}
+	const endText = formatClockTime(label.endTime);
+	if (!endText || endText === startText) {
+		return startText;
+	}
+	return `${startText}-${endText}`;
+}
+
+function formatExactDateTime(value: string | null) {
+	if (!value) return "Unknown capture time";
+	return formatIsoDateTime(value, tripBundle?.display.timezone);
+}
+
+function compareTripPhotos(left: TripPhotoAnchor, right: TripPhotoAnchor) {
+	const leftTime = left.captureTime
+		? Date.parse(left.captureTime)
+		: Number.POSITIVE_INFINITY;
+	const rightTime = right.captureTime
+		? Date.parse(right.captureTime)
+		: Number.POSITIVE_INFINITY;
+	if (leftTime !== rightTime) {
+		return leftTime - rightTime;
+	}
+	return left.sourceLabel.localeCompare(right.sourceLabel);
 }
 
 function worldToHeightmapSample(
@@ -622,7 +789,6 @@ function appendTimelineLabel(
 function buildTrackTimelineLabels(
 	segments: TripTrackSegment[],
 	clusters: TripCluster[],
-	photoAnchors: TripPhotoAnchor[],
 	exaggeration: number,
 ) {
 	clearTrackTimelineLabels();
@@ -649,26 +815,19 @@ function buildTrackTimelineLabels(
 	}
 
 	for (const cluster of clusters) {
-		const clusterTimeMs =
-			photoAnchors
-				.filter((anchor) => anchor.clusterId === cluster.id)
-				.map((anchor) => anchor.captureTime)
-				.filter((value): value is string => Boolean(value))
-				.map((value) => Date.parse(value))
-				.filter((value) => !Number.isNaN(value))
-				.sort((a, b) => a - b)[0] ?? null;
-		if (clusterTimeMs === null) continue;
-
-		const text = formatTimelineLabel(clusterTimeMs, "photo");
+		const text = formatClusterTimeLabel(cluster.timeLabel);
 		if (!text) continue;
+		const clusterTimeMs = Date.parse(cluster.timeLabel?.startTime ?? "");
+		const sortTimeMs = Number.isNaN(clusterTimeMs) ? null : clusterTimeMs;
 
 		candidates.push({
 			x: cluster.x,
 			y: cluster.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET + 28,
 			z: cluster.z,
-			timeMs: clusterTimeMs,
+			timeMs: sortTimeMs,
 			text,
 			priority: 1,
+			alwaysShow: true,
 		});
 	}
 
@@ -819,7 +978,10 @@ async function buildClusterObject(
 	const CARD_GAP = 10;
 	const anchorY = cluster.terrainHeight * exaggeration + 6;
 	const cardY = anchorY + cluster.cardHeight;
-	const members = anchors.filter((anchor) => anchor.clusterId === cluster.id);
+	const anchorById = new Map(anchors.map((anchor) => [anchor.id, anchor]));
+	const members = cluster.memberIds
+		.map((id) => anchorById.get(id))
+		.filter((anchor): anchor is TripPhotoAnchor => Boolean(anchor));
 	const marker = new THREE.Mesh(
 		new THREE.SphereGeometry(10, 20, 20),
 		new THREE.MeshStandardMaterial({
@@ -864,10 +1026,32 @@ async function buildClusterObject(
 		sprite.scale.set(CARD_W, CARD_H, 1);
 		sprite.position.set(0, cardY + index * (CARD_H + CARD_GAP), 0);
 		sprite.renderOrder = 32 + index;
+		sprite.userData.photoId = preview.id;
 		group.add(sprite);
+		photoSprites.push(sprite);
 	}
 
 	return group;
+}
+
+function disposeClusterObject(object: THREE.Object3D) {
+	object.traverse((node) => {
+		if ("geometry" in node && node.geometry) {
+			node.geometry.dispose();
+		}
+		if ("material" in node && node.material) {
+			const materials = Array.isArray(node.material)
+				? node.material
+				: [node.material];
+			for (const material of materials) {
+				if ("map" in material && material.map) {
+					material.map.dispose();
+				}
+				material.dispose();
+			}
+		}
+	});
+	scene.remove(object);
 }
 
 async function renderClusters(
@@ -876,9 +1060,10 @@ async function renderClusters(
 	exaggeration: number,
 ) {
 	for (const object of clusterObjects) {
-		scene.remove(object);
+		disposeClusterObject(object);
 	}
 	clusterObjects.length = 0;
+	photoSprites.length = 0;
 
 	for (const cluster of clusters) {
 		const clusterObject = await buildClusterObject(
@@ -985,6 +1170,24 @@ function updateKeyboardNavigation(deltaSeconds: number) {
 	return true;
 }
 
+function openGalleryFromPointerEvent(event: PointerEvent) {
+	if (galleryIndex.value >= 0 || photoSprites.length === 0) {
+		return;
+	}
+
+	const rect = canvas.getBoundingClientRect();
+	pointerNdc.set(
+		((event.clientX - rect.left) / rect.width) * 2 - 1,
+		-(((event.clientY - rect.top) / rect.height) * 2 - 1),
+	);
+	raycaster.setFromCamera(pointerNdc, camera);
+	const hit = raycaster.intersectObjects(photoSprites, false)[0];
+	const photoId = hit?.object.userData.photoId;
+	if (typeof photoId === "string") {
+		openGalleryForPhoto(photoId);
+	}
+}
+
 function requestRender() {
 	if (animationHandle !== 0) {
 		return;
@@ -993,6 +1196,10 @@ function requestRender() {
 }
 
 function handleViewerKeyboard(event: KeyboardEvent) {
+	if (galleryIndex.value >= 0) {
+		return;
+	}
+
 	if (document.activeElement !== canvas) {
 		return;
 	}
@@ -1142,12 +1349,13 @@ async function loadTerrainAndTrip() {
 	buildTrackTimelineLabels(
 		trip.trackSegments,
 		trip.clusters,
-		trip.photoAnchors,
 		terrainRuntime.currentExaggeration,
 	);
 
 	tripClusters.value = trip.clusters;
 	tripPhotoAnchors.value = trip.photoAnchors;
+	galleryPhotos.value = [...trip.photoAnchors].sort(compareTripPhotos);
+	galleryIndex.value = -1;
 	tripStats.value = trip.stats;
 	resetVisible.value = true;
 
@@ -1162,7 +1370,7 @@ function animate() {
 	animationHandle = 0;
 	const deltaSeconds = Math.min(clock.getDelta(), 0.1);
 	const movedByKeyboard = updateKeyboardNavigation(deltaSeconds);
-	const controlsChanged = controls.update();
+	const controlsChanged = controls.enabled ? controls.update() : false;
 	updateTrackTimelineLabels();
 	renderer.render(scene, camera);
 	if (movedByKeyboard || controlsChanged) {
@@ -1218,7 +1426,46 @@ canvas.addEventListener("pointerdown", () => {
 	canvas.focus({ preventScroll: true });
 	dismissTripHint();
 });
+canvas.addEventListener("pointerdown", (event) => {
+	if (event.button !== 0) return;
+	pointerDownClientX = event.clientX;
+	pointerDownClientY = event.clientY;
+	pointerDownActive = true;
+});
+canvas.addEventListener("pointerup", (event) => {
+	if (!pointerDownActive || event.button !== 0) return;
+	pointerDownActive = false;
+	const movedDistance = Math.hypot(
+		event.clientX - pointerDownClientX,
+		event.clientY - pointerDownClientY,
+	);
+	if (movedDistance > CLICK_DRAG_THRESHOLD_PX) {
+		return;
+	}
+	openGalleryFromPointerEvent(event);
+});
+canvas.addEventListener("pointercancel", () => {
+	pointerDownActive = false;
+});
 window.addEventListener("keydown", (event) => {
+	if (galleryIndex.value >= 0) {
+		switch (event.code) {
+			case "ArrowLeft":
+				event.preventDefault();
+				stepGallery(-1);
+				return;
+			case "ArrowRight":
+				event.preventDefault();
+				stepGallery(1);
+				return;
+			case "Escape":
+				event.preventDefault();
+				closeGallery();
+				return;
+			default:
+				return;
+		}
+	}
 	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) {
 		return;
 	}
@@ -1235,11 +1482,15 @@ window.addEventListener("keydown", (event) => {
 	event.preventDefault();
 });
 window.addEventListener("keyup", (event) => {
+	if (galleryIndex.value >= 0) {
+		return;
+	}
 	pressedKeys.delete(event.code);
 	requestRender();
 });
 window.addEventListener("blur", () => {
 	pressedKeys.clear();
+	closeGallery();
 	requestRender();
 });
 document.addEventListener("fullscreenchange", syncFullscreenState);
@@ -1280,8 +1531,9 @@ window.addEventListener("beforeunload", () => {
 		line.material.dispose();
 	}
 	for (const object of clusterObjects) {
-		scene.remove(object);
+		disposeClusterObject(object);
 	}
+	photoSprites.length = 0;
 	clearTrackTimelineLabels();
 	terrainRuntime?.mesh.material.map?.dispose();
 	terrainRuntime?.mesh.material.dispose();
