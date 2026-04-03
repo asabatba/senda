@@ -198,6 +198,68 @@ function App() {
 							zoom, R to reset, F for fullscreen.
 						</span>
 					</div>
+					{photo && (
+						<div
+							class="trip-gallery"
+							role="dialog"
+							aria-modal="true"
+							aria-label="Photo gallery"
+							onClick={closeGallery}
+							onWheel={handleGalleryWheel}
+						>
+							<div
+								class="trip-gallery-shell"
+								onClick={(event) => event.stopPropagation()}
+							>
+								<button
+									class="trip-gallery-close"
+									type="button"
+									onClick={closeGallery}
+									aria-label="Close gallery"
+								>
+									Close
+								</button>
+								<button
+									class="trip-gallery-nav trip-gallery-nav-prev"
+									type="button"
+									onClick={() => stepGallery(-1)}
+									aria-label="Previous image"
+								>
+									Prev
+								</button>
+								<button
+									class="trip-gallery-nav trip-gallery-nav-next"
+									type="button"
+									onClick={() => stepGallery(1)}
+									aria-label="Next image"
+								>
+									Next
+								</button>
+								<div class="trip-gallery-media">
+									<img
+										class="trip-gallery-image"
+										src={photo.imageUrl}
+										alt={photo.description ?? photo.sourceLabel}
+									/>
+								</div>
+								<div class="trip-gallery-meta">
+									<div class="trip-gallery-count">
+										{galleryIndex.value + 1} / {photoCount}
+									</div>
+									<h2>{photo.description ?? photo.sourceLabel}</h2>
+									<p>{photo.sourceLabel}</p>
+									<p>{photoDateLabel}</p>
+									<button
+										class="trip-gallery-action"
+										type="button"
+										onClick={() => flyToPhotoFromGallery(photo)}
+									>
+										Go to location
+									</button>
+								</div>
+							</div>
+						</div>
+					)}
 				</section>
 				<aside class="trip-panel">
 					<p class="trip-eyebrow">Standalone Export</p>
@@ -255,68 +317,6 @@ function App() {
 					)}
 				</aside>
 			</div>
-			{photo && (
-				<div
-					class="trip-gallery"
-					role="dialog"
-					aria-modal="true"
-					aria-label="Photo gallery"
-					onClick={closeGallery}
-					onWheel={handleGalleryWheel}
-				>
-					<div
-						class="trip-gallery-shell"
-						onClick={(event) => event.stopPropagation()}
-					>
-						<button
-							class="trip-gallery-close"
-							type="button"
-							onClick={closeGallery}
-							aria-label="Close gallery"
-						>
-							Close
-						</button>
-						<button
-							class="trip-gallery-nav trip-gallery-nav-prev"
-							type="button"
-							onClick={() => stepGallery(-1)}
-							aria-label="Previous image"
-						>
-							Prev
-						</button>
-						<button
-							class="trip-gallery-nav trip-gallery-nav-next"
-							type="button"
-							onClick={() => stepGallery(1)}
-							aria-label="Next image"
-						>
-							Next
-						</button>
-						<div class="trip-gallery-media">
-							<img
-								class="trip-gallery-image"
-								src={photo.imageUrl}
-								alt={photo.description ?? photo.sourceLabel}
-							/>
-						</div>
-						<div class="trip-gallery-meta">
-							<div class="trip-gallery-count">
-								{galleryIndex.value + 1} / {photoCount}
-							</div>
-							<h2>{photo.description ?? photo.sourceLabel}</h2>
-							<p>{photo.sourceLabel}</p>
-							<p>{photoDateLabel}</p>
-							<button
-								class="trip-gallery-action"
-								type="button"
-								onClick={() => flyToPhotoFromGallery(photo)}
-							>
-								Go to location
-							</button>
-						</div>
-					</div>
-				</div>
-			)}
 		</>
 	);
 }
