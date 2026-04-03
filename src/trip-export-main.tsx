@@ -110,6 +110,15 @@ type TrackTimelineLabel = {
 	priority: number;
 };
 
+type CameraFlight = {
+	startPosition: THREE.Vector3;
+	startTarget: THREE.Vector3;
+	endPosition: THREE.Vector3;
+	endTarget: THREE.Vector3;
+	startTime: number;
+	durationMs: number;
+};
+
 // ─── Signals ──────────────────────────────────────────────────────────────────
 
 const statusMsg = signal("Loading trip bundle...");
@@ -150,7 +159,7 @@ function ClusterItem({ cluster }: { cluster: TripCluster }) {
 function App() {
 	const galleryOpen = galleryIndex.value >= 0;
 	const photo = galleryOpen
-		? galleryPhotos.value[galleryIndex.value] ?? null
+		? (galleryPhotos.value[galleryIndex.value] ?? null)
 		: null;
 	const photoCount = galleryPhotos.value.length;
 	const photoDateLabel = photo
@@ -194,12 +203,14 @@ function App() {
 					<p class="trip-eyebrow">Standalone Export</p>
 					<h1 class="trip-title">Trip Scene</h1>
 					<p class="trip-lede">
-						Terrain, orthophoto, route line, and photo clusters are prepacked into
-						this self-contained scene.
+						Terrain, orthophoto, route line, and photo clusters are prepacked
+						into this self-contained scene.
 					</p>
 					<p
 						class={
-							statusError.value ? "trip-status trip-status-error" : "trip-status"
+							statusError.value
+								? "trip-status trip-status-error"
+								: "trip-status"
 						}
 					>
 						{statusMsg.value}
@@ -253,7 +264,10 @@ function App() {
 					onClick={closeGallery}
 					onWheel={handleGalleryWheel}
 				>
-					<div class="trip-gallery-shell" onClick={(event) => event.stopPropagation()}>
+					<div
+						class="trip-gallery-shell"
+						onClick={(event) => event.stopPropagation()}
+					>
 						<button
 							class="trip-gallery-close"
 							type="button"
@@ -292,6 +306,13 @@ function App() {
 							<h2>{photo.description ?? photo.sourceLabel}</h2>
 							<p>{photo.sourceLabel}</p>
 							<p>{photoDateLabel}</p>
+							<button
+								class="trip-gallery-action"
+								type="button"
+								onClick={() => flyToPhotoFromGallery(photo)}
+							>
+								Go to location
+							</button>
 						</div>
 					</div>
 				</div>
@@ -323,10 +344,13 @@ let pointerDownClientX = 0;
 let pointerDownClientY = 0;
 let pointerDownActive = false;
 let lastGalleryWheelAt = 0;
+let cameraFlight: CameraFlight | null = null;
 
 const KEYBOARD_ZOOM_FACTOR = 1.16;
 const GALLERY_WHEEL_COOLDOWN_MS = 180;
 const CLICK_DRAG_THRESHOLD_PX = 8;
+const PHOTO_FLIGHT_MIN_DURATION_MS = 650;
+const PHOTO_FLIGHT_MAX_DURATION_MS = 1400;
 
 const clock = new THREE.Clock();
 const pressedKeys = new Set<string>();
@@ -337,6 +361,9 @@ const labelWorldPos = new THREE.Vector3();
 const labelProjectedPos = new THREE.Vector3();
 const pointerNdc = new THREE.Vector2();
 const raycaster = new THREE.Raycaster();
+const flightTarget = new THREE.Vector3();
+const flightPosition = new THREE.Vector3();
+const flightOffset = new THREE.Vector3();
 
 // ─── UI callbacks (used in components) ────────────────────────────────────────
 
@@ -370,7 +397,8 @@ function scheduleTripHintDismiss() {
 function openGalleryAt(index: number) {
 	const photos = galleryPhotos.value;
 	if (photos.length === 0) return;
-	const normalizedIndex = ((index % photos.length) + photos.length) % photos.length;
+	const normalizedIndex =
+		((index % photos.length) + photos.length) % photos.length;
 	galleryIndex.value = normalizedIndex;
 	controls.enabled = false;
 	dismissTripHint();
@@ -396,13 +424,94 @@ function stepGallery(direction: number) {
 	openGalleryAt(galleryIndex.value + direction);
 }
 
+function easeInOutCubic(value: number) {
+	return value < 0.5
+		? 4 * value * value * value
+		: 1 - (-2 * value + 2) ** 3 / 2;
+}
+
+function beginCameraFlight(
+	endTarget: THREE.Vector3,
+	endPosition: THREE.Vector3,
+) {
+	const distance = camera.position.distanceTo(endPosition);
+	cameraFlight = {
+		startPosition: camera.position.clone(),
+		startTarget: controls.target.clone(),
+		endPosition: endPosition.clone(),
+		endTarget: endTarget.clone(),
+		startTime: performance.now(),
+		durationMs: THREE.MathUtils.clamp(
+			520 + distance * 0.75,
+			PHOTO_FLIGHT_MIN_DURATION_MS,
+			PHOTO_FLIGHT_MAX_DURATION_MS,
+		),
+	};
+	pressedKeys.clear();
+	controls.enabled = false;
+	dismissTripHint();
+	clock.getDelta();
+	requestRender();
+}
+
+function updateCameraFlight(now: number) {
+	if (!cameraFlight) {
+		return false;
+	}
+
+	const elapsed = now - cameraFlight.startTime;
+	const progress = THREE.MathUtils.clamp(
+		elapsed / cameraFlight.durationMs,
+		0,
+		1,
+	);
+	const easedProgress = easeInOutCubic(progress);
+	camera.position.lerpVectors(
+		cameraFlight.startPosition,
+		cameraFlight.endPosition,
+		easedProgress,
+	);
+	controls.target.lerpVectors(
+		cameraFlight.startTarget,
+		cameraFlight.endTarget,
+		easedProgress,
+	);
+	camera.updateProjectionMatrix();
+	controls.update();
+
+	if (progress >= 1) {
+		controls.enabled = true;
+		cameraFlight = null;
+		return false;
+	}
+
+	return true;
+}
+
+function flyToPhotoFromGallery(photo: TripPhotoAnchor) {
+	const exaggeration = terrainRuntime?.currentExaggeration ?? 1;
+	const targetY = photo.terrainHeight * exaggeration + 22;
+	flightTarget.set(photo.x, targetY, photo.z);
+	flightOffset.set(260, 190, 260);
+	const distance = THREE.MathUtils.clamp(
+		flightOffset.length(),
+		controls.minDistance,
+		controls.maxDistance,
+	);
+	flightOffset.setLength(distance);
+	flightPosition.copy(flightTarget).add(flightOffset);
+	closeGallery();
+	beginCameraFlight(flightTarget, flightPosition);
+}
+
 function handleGalleryWheel(event: WheelEvent) {
 	if (galleryIndex.value < 0) return;
 	event.preventDefault();
 	event.stopPropagation();
-	const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX)
-		? event.deltaY
-		: event.deltaX;
+	const delta =
+		Math.abs(event.deltaY) >= Math.abs(event.deltaX)
+			? event.deltaY
+			: event.deltaX;
 	if (Math.abs(delta) < 12) return;
 	const now = Date.now();
 	if (now - lastGalleryWheelAt < GALLERY_WHEEL_COOLDOWN_MS) return;
@@ -411,6 +520,8 @@ function handleGalleryWheel(event: WheelEvent) {
 }
 
 function zoomToCluster(cluster: TripCluster) {
+	cameraFlight = null;
+	controls.enabled = true;
 	controls.target.set(
 		cluster.x,
 		cluster.terrainHeight * (terrainRuntime?.currentExaggeration ?? 1),
@@ -1077,6 +1188,8 @@ async function renderClusters(
 }
 
 function focusScene(metadata: TerrainMetadata) {
+	cameraFlight = null;
+	controls.enabled = true;
 	const maxSpan = Math.max(
 		metadata.sizeMeters.width,
 		metadata.sizeMeters.height,
@@ -1095,6 +1208,8 @@ function focusScene(metadata: TerrainMetadata) {
 }
 
 function zoomCamera(scale: number) {
+	cameraFlight = null;
+	controls.enabled = true;
 	const offset = camera.position.clone().sub(controls.target);
 	const currentDistance = offset.length();
 	const nextDistance = THREE.MathUtils.clamp(
@@ -1108,7 +1223,7 @@ function zoomCamera(scale: number) {
 }
 
 function updateKeyboardNavigation(deltaSeconds: number) {
-	if (!terrainRuntime || pressedKeys.size === 0) {
+	if (!terrainRuntime || pressedKeys.size === 0 || cameraFlight) {
 		return false;
 	}
 
@@ -1196,7 +1311,7 @@ function requestRender() {
 }
 
 function handleViewerKeyboard(event: KeyboardEvent) {
-	if (galleryIndex.value >= 0) {
+	if (galleryIndex.value >= 0 || cameraFlight) {
 		return;
 	}
 
@@ -1370,10 +1485,12 @@ function animate() {
 	animationHandle = 0;
 	const deltaSeconds = Math.min(clock.getDelta(), 0.1);
 	const movedByKeyboard = updateKeyboardNavigation(deltaSeconds);
-	const controlsChanged = controls.enabled ? controls.update() : false;
+	const flightActive = updateCameraFlight(performance.now());
+	const controlsChanged =
+		!flightActive && controls.enabled ? controls.update() : false;
 	updateTrackTimelineLabels();
 	renderer.render(scene, camera);
-	if (movedByKeyboard || controlsChanged) {
+	if (movedByKeyboard || controlsChanged || flightActive) {
 		requestRender();
 	}
 }
@@ -1466,6 +1583,9 @@ window.addEventListener("keydown", (event) => {
 				return;
 		}
 	}
+	if (cameraFlight) {
+		return;
+	}
 	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) {
 		return;
 	}
@@ -1485,11 +1605,17 @@ window.addEventListener("keyup", (event) => {
 	if (galleryIndex.value >= 0) {
 		return;
 	}
+	if (cameraFlight) {
+		pressedKeys.clear();
+		return;
+	}
 	pressedKeys.delete(event.code);
 	requestRender();
 });
 window.addEventListener("blur", () => {
 	pressedKeys.clear();
+	cameraFlight = null;
+	controls.enabled = galleryIndex.value < 0;
 	closeGallery();
 	requestRender();
 });

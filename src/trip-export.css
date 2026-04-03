@@ -381,6 +381,30 @@ body {
 	text-transform: uppercase;
 }
 
+.trip-gallery-action {
+	appearance: none;
+	width: fit-content;
+	margin-top: 0.4rem;
+	border: 1px solid rgba(255, 244, 219, 0.16);
+	border-radius: 999px;
+	padding: 0.78rem 1rem;
+	background: rgba(255, 244, 219, 0.08);
+	color: #fff3d3;
+	font: inherit;
+	font-weight: 700;
+	cursor: pointer;
+	transition:
+		background 160ms ease,
+		border-color 160ms ease,
+		transform 160ms ease;
+}
+
+.trip-gallery-action:hover {
+	background: rgba(255, 244, 219, 0.14);
+	border-color: rgba(255, 244, 219, 0.24);
+	transform: translateY(-1px);
+}
+
 .trip-gallery-close,
 .trip-gallery-nav {
 	position: absolute;
