@@ -84,10 +84,14 @@ const namedPlaceLegend = signal<NamedPlaceLegendEntry[]>([]);
 const namedPlaceLegendCount = signal(0);
 const fullscreenActive = signal(false);
 const walkModeOn = signal(false);
+const trackFollowOn = signal(false);
+const trackFollowActiveId = signal<string | null>(null);
 
 // ─── Preact components ────────────────────────────────────────────────────────
 
 function TrackListItem({ overlay }: { overlay: TrackOverlay }) {
+	const isFollowing =
+		trackFollowActiveId.value === overlay.id && trackFollowOn.value;
 	return (
 		<li class="track-item">
 			<div class="track-item-header">
@@ -112,6 +116,15 @@ function TrackListItem({ overlay }: { overlay: TrackOverlay }) {
 						onClick={() => handleTrackZoom(overlay)}
 					>
 						Zoom to track
+					</button>
+					<button
+						type="button"
+						class={
+							isFollowing ? "track-button track-button-active" : "track-button"
+						}
+						onClick={() => handleTrackFollow(overlay)}
+					>
+						{isFollowing ? "Stop follow" : "Follow"}
 					</button>
 					<button
 						type="button"
@@ -163,12 +176,20 @@ function App() {
 				)}
 				<canvas class="viewer" aria-label="3D terrain viewer" />
 				<div class="viewer-overlay" />
-				{walkModeOn.value ? (
+				{trackFollowOn.value ? (
+					<div class="viewer-hint">
+						<strong>Track follow</strong>
+						<span>
+							W/S or arrows to move along track · Mouse to look · Shift to
+							accelerate · Escape to exit.
+						</span>
+					</div>
+				) : walkModeOn.value ? (
 					<div class="viewer-hint">
 						<strong>Surface view</strong>
 						<span>
-							WASD or arrows to move · Mouse to look · Shift to accelerate ·
-							V or button to exit.
+							WASD or arrows to move · Mouse to look · Shift to accelerate · V
+							or button to exit.
 						</span>
 					</div>
 				) : (
@@ -346,6 +367,182 @@ let animationHandle = 0;
 let trackColorCursor = 0;
 let orthophotoSwitchInFlight = false;
 
+// ─── Track follow mode state ──────────────────────────────────────────────────
+
+type TrackFollowPoint = { x: number; y: number; z: number; dist: number };
+
+const FOLLOW_HEIGHT_OFFSET = 5;
+const FOLLOW_SPEED = 40; // m/s base
+const FOLLOW_NEAR_PLANE = 1;
+
+let followPath: TrackFollowPoint[] = [];
+let followDist = 0; // current arc-length position along path
+let followModeActive = false;
+
+function buildFollowPath(overlay: TrackOverlay): TrackFollowPoint[] {
+	const points: TrackFollowPoint[] = [];
+	let dist = 0;
+	for (const segment of overlay.segments) {
+		for (let i = 0; i < segment.points.length; i++) {
+			const p = segment.points[i]!;
+			const y = p.terrainHeight + FOLLOW_HEIGHT_OFFSET;
+			if (points.length > 0) {
+				const prev = points[points.length - 1]!;
+				const dx = p.x - prev.x;
+				const dz = p.z - prev.z;
+				dist += Math.sqrt(dx * dx + dz * dz);
+			}
+			points.push({ x: p.x, y, z: p.z, dist });
+		}
+	}
+	return points;
+}
+
+function sampleFollowPath(path: TrackFollowPoint[], d: number) {
+	if (path.length === 0) return null;
+	const last = path[path.length - 1]!;
+	const clamped = THREE.MathUtils.clamp(d, 0, last.dist);
+	let lo = 0;
+	let hi = path.length - 1;
+	while (lo + 1 < hi) {
+		const mid = (lo + hi) >> 1;
+		if (path[mid]!.dist <= clamped) lo = mid;
+		else hi = mid;
+	}
+	const a = path[lo]!;
+	const b = path[hi]!;
+	const span = b.dist - a.dist;
+	const t = span > 0 ? (clamped - a.dist) / span : 0;
+	return {
+		x: THREE.MathUtils.lerp(a.x, b.x, t),
+		y: THREE.MathUtils.lerp(a.y, b.y, t),
+		z: THREE.MathUtils.lerp(a.z, b.z, t),
+	};
+}
+
+function closestDistOnPath(
+	path: TrackFollowPoint[],
+	cx: number,
+	cz: number,
+): number {
+	let bestDist = 0;
+	let bestSq = Infinity;
+	for (let i = 0; i + 1 < path.length; i++) {
+		const a = path[i]!;
+		const b = path[i + 1]!;
+		const abx = b.x - a.x;
+		const abz = b.z - a.z;
+		const abLen2 = abx * abx + abz * abz;
+		let t = 0;
+		if (abLen2 > 0) {
+			t = THREE.MathUtils.clamp(
+				((cx - a.x) * abx + (cz - a.z) * abz) / abLen2,
+				0,
+				1,
+			);
+		}
+		const px = a.x + t * abx;
+		const pz = a.z + t * abz;
+		const dx = cx - px;
+		const dz = cz - pz;
+		const sq = dx * dx + dz * dz;
+		if (sq < bestSq) {
+			bestSq = sq;
+			bestDist = a.dist + t * (b.dist - a.dist);
+		}
+	}
+	return bestDist;
+}
+
+function enterFollowMode(overlay: TrackOverlay) {
+	if (walkModeActive) exitWalkMode();
+	followPath = buildFollowPath(overlay);
+	if (followPath.length < 2) return;
+
+	// Snap to the closest point on the path to the current camera position
+	followDist = closestDistOnPath(
+		followPath,
+		camera.position.x,
+		camera.position.z,
+	);
+
+	followModeActive = true;
+	trackFollowOn.value = true;
+	trackFollowActiveId.value = overlay.id;
+
+	// Inherit current camera look direction
+	const dir = new THREE.Vector3();
+	camera.getWorldDirection(dir);
+	walkEuler.x = Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
+	const cosPitch = Math.cos(walkEuler.x);
+	walkEuler.y =
+		cosPitch > 0.01 ? Math.atan2(-dir.x / cosPitch, -dir.z / cosPitch) : 0;
+	walkEuler.z = 0;
+	camera.rotation.order = "YXZ";
+	camera.rotation.set(walkEuler.x, walkEuler.y, 0);
+
+	// Snap camera to the closest path position immediately
+	const startPos = sampleFollowPath(followPath, followDist);
+	if (startPos) camera.position.set(startPos.x, startPos.y, startPos.z);
+
+	camera.near = FOLLOW_NEAR_PLANE;
+	camera.updateProjectionMatrix();
+	controls.enabled = false;
+
+	// Blur any focused UI element so keyboard events aren't swallowed
+	(document.activeElement as HTMLElement)?.blur();
+
+	void canvas.requestPointerLock();
+	requestRender();
+}
+
+function exitFollowMode() {
+	if (!followModeActive) return;
+	followModeActive = false;
+	followPath = [];
+	trackFollowOn.value = false;
+	trackFollowActiveId.value = null;
+
+	camera.near = 10;
+	camera.updateProjectionMatrix();
+
+	const dir = new THREE.Vector3();
+	camera.getWorldDirection(dir);
+	controls.target.copy(camera.position).addScaledVector(dir, 500);
+	controls.enabled = true;
+	controls.update();
+	document.exitPointerLock();
+	requestRender();
+}
+
+function updateFollowMode(deltaSeconds: number): boolean {
+	if (!followModeActive || followPath.length < 2 || pressedKeys.size === 0)
+		return false;
+
+	const totalDist = followPath[followPath.length - 1]!.dist;
+	const speedMult =
+		pressedKeys.has("ShiftLeft") || pressedKeys.has("ShiftRight") ? 2.5 : 1;
+	const step = FOLLOW_SPEED * speedMult * deltaSeconds;
+
+	let moved = false;
+	if (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp")) {
+		followDist = THREE.MathUtils.clamp(followDist + step, 0, totalDist);
+		moved = true;
+	}
+	if (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown")) {
+		followDist = THREE.MathUtils.clamp(followDist - step, 0, totalDist);
+		moved = true;
+	}
+
+	if (!moved) return false;
+
+	const pos = sampleFollowPath(followPath, followDist);
+	if (!pos) return false;
+	camera.position.set(pos.x, pos.y, pos.z);
+
+	return true;
+}
+
 // ─── Walk mode state ──────────────────────────────────────────────────────────
 
 const WALK_HEIGHT_OFFSET = 5; // real meters above terrain surface
@@ -395,9 +592,20 @@ function handleTrackZoom(overlay: TrackOverlay) {
 	focusTrackOverlay(overlay);
 }
 
+function handleTrackFollow(overlay: TrackOverlay) {
+	if (followModeActive && trackFollowActiveId.value === overlay.id) {
+		exitFollowMode();
+	} else {
+		enterFollowMode(overlay);
+	}
+}
+
 function handleTrackRemove(overlay: TrackOverlay) {
 	const index = trackOverlays.findIndex((entry) => entry.id === overlay.id);
 	if (index >= 0) {
+		if (followModeActive && trackFollowActiveId.value === overlay.id) {
+			exitFollowMode();
+		}
 		disposeTrackOverlay(overlay);
 		trackOverlays.splice(index, 1);
 		trackItems.value = [...trackOverlays];
@@ -598,9 +806,7 @@ function updateTrackMaterialsResolution() {
 
 function updateTrackOverlayGeometry(overlay: TrackOverlay) {
 	overlay.lines.forEach((line, index) => {
-		line.geometry.setPositions(
-			buildLinePositions(overlay.segments[index]!),
-		);
+		line.geometry.setPositions(buildLinePositions(overlay.segments[index]!));
 		line.computeLineDistances();
 	});
 	overlay.bounds = computeTrackBounds(overlay);
@@ -678,11 +884,7 @@ function setNamedPlacesVisible(visible: boolean, persist = true) {
 	if (!visible) {
 		hideNamedPlaceLabels();
 	} else {
-		updateNamedPlaceOverlay(
-			terrainRuntime.namedPlaceOverlay,
-			camera,
-			canvas,
-		);
+		updateNamedPlaceOverlay(terrainRuntime.namedPlaceOverlay, camera, canvas);
 	}
 	if (persist) {
 		persistNamedPlacesVisible(visible);
@@ -695,7 +897,8 @@ function resetCamera(metadata: TerrainMetadata) {
 		metadata.sizeMeters.width,
 		metadata.sizeMeters.height,
 	);
-	const verticalRange = metadata.elevationRange.max - metadata.elevationRange.min;
+	const verticalRange =
+		metadata.elevationRange.max - metadata.elevationRange.min;
 	camera.position.set(0, maxSpan * 0.42 + verticalRange * 0.8, maxSpan * 0.82);
 	controls.target.set(0, verticalRange * 0.18, 0);
 	controls.maxDistance = maxSpan * 3.2;
@@ -737,8 +940,7 @@ function enterWalkMode() {
 		camera.position.x,
 		camera.position.z,
 	);
-	camera.position.y =
-		rawHeight + WALK_HEIGHT_OFFSET;
+	camera.position.y = rawHeight + WALK_HEIGHT_OFFSET;
 
 	camera.rotation.order = "YXZ";
 	camera.rotation.set(walkEuler.x, walkEuler.y, 0);
@@ -748,6 +950,7 @@ function enterWalkMode() {
 	camera.updateProjectionMatrix();
 
 	controls.enabled = false;
+	(document.activeElement as HTMLElement)?.blur();
 	void canvas.requestPointerLock();
 	requestRender();
 }
@@ -780,7 +983,11 @@ function handleWalkModeToggle() {
 }
 
 function handleWalkMouseMove(event: MouseEvent) {
-	if (!walkModeActive || document.pointerLockElement !== canvas) return;
+	if (
+		(!walkModeActive && !followModeActive) ||
+		document.pointerLockElement !== canvas
+	)
+		return;
 
 	walkEuler.y -= event.movementX * WALK_MOUSE_SENSITIVITY;
 	walkEuler.x -= event.movementY * WALK_MOUSE_SENSITIVITY;
@@ -857,8 +1064,7 @@ function updateWalkMode(deltaSeconds: number): boolean {
 		camera.position.x,
 		camera.position.z,
 	);
-	const targetY =
-		rawHeight + WALK_HEIGHT_OFFSET;
+	const targetY = rawHeight + WALK_HEIGHT_OFFSET;
 	if (Math.abs(camera.position.y - targetY) > 0.01) {
 		camera.position.y = targetY;
 		moved = true;
@@ -1220,7 +1426,11 @@ function animate() {
 	const deltaSeconds = Math.min(clock.getDelta(), 0.1);
 	let movedByKeyboard: boolean;
 	let controlsChanged: boolean;
-	if (walkModeActive) {
+	if (followModeActive) {
+		movedByKeyboard = updateFollowMode(deltaSeconds);
+		controlsChanged = false;
+		// mouse look still uses walkEuler — camera.rotation is already set by handleWalkMouseMove
+	} else if (walkModeActive) {
 		movedByKeyboard = updateWalkMode(deltaSeconds);
 		controlsChanged = false;
 	} else {
@@ -1228,11 +1438,7 @@ function animate() {
 		controlsChanged = controls.update();
 	}
 	if (terrainRuntime?.namedPlaceOverlay && terrainRuntime.namedPlacesVisible) {
-		updateNamedPlaceOverlay(
-			terrainRuntime.namedPlaceOverlay,
-			camera,
-			canvas,
-		);
+		updateNamedPlaceOverlay(terrainRuntime.namedPlaceOverlay, camera, canvas);
 	}
 	renderer.render(scene, camera);
 	if (movedByKeyboard || controlsChanged) {
@@ -1305,10 +1511,17 @@ window.addEventListener("keydown", (event) => {
 		handleWalkModeToggle();
 		return;
 	}
-	if (event.code === "Escape" && !event.repeat && walkModeActive) {
-		event.preventDefault();
-		exitWalkMode();
-		return;
+	if (event.code === "Escape" && !event.repeat) {
+		if (followModeActive) {
+			event.preventDefault();
+			exitFollowMode();
+			return;
+		}
+		if (walkModeActive) {
+			event.preventDefault();
+			exitWalkMode();
+			return;
+		}
 	}
 	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) return;
 	if (isEditableTarget(event.target)) return;
@@ -1331,14 +1544,15 @@ window.addEventListener("blur", () => {
 });
 document.addEventListener("fullscreenchange", syncFullscreenState);
 document.addEventListener("pointerlockchange", () => {
-	// If pointer lock was released externally (e.g. Escape), exit walk mode
-	if (walkModeActive && document.pointerLockElement !== canvas) {
-		exitWalkMode();
-	}
+	if (document.pointerLockElement === canvas) return;
+	if (followModeActive) exitFollowMode();
+	else if (walkModeActive) exitWalkMode();
 });
 canvas.addEventListener("click", () => {
-	// Re-acquire pointer lock if walk mode is active but lock was lost
-	if (walkModeActive && document.pointerLockElement !== canvas) {
+	if (
+		(followModeActive || walkModeActive) &&
+		document.pointerLockElement !== canvas
+	) {
 		void canvas.requestPointerLock();
 	}
 });

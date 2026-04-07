@@ -25,20 +25,17 @@
 html,
 body,
 #app {
-	min-height: 100%;
+	height: 100%;
 	margin: 0;
 }
 
-body {
-	min-height: 100vh;
-}
-
 .layout {
-	min-height: 100vh;
+	height: 100vh;
 	display: grid;
 	grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.6fr);
 	gap: 1rem;
 	padding: 1rem;
+	overflow: hidden;
 }
 
 .viewer-shell,
@@ -51,7 +48,7 @@ body {
 }
 
 .viewer-shell {
-	min-height: 72vh;
+	min-height: 0;
 	isolation: isolate;
 	background:
 		radial-gradient(
@@ -181,6 +178,8 @@ body {
 
 .panel {
 	padding: 1.5rem;
+	overflow-y: auto;
+	min-height: 0;
 	background:
 		linear-gradient(180deg, rgba(33, 45, 34, 0.92), rgba(20, 28, 21, 0.96)),
 		linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent);
@@ -480,6 +479,12 @@ input[type="range"] {
 	background: rgba(110, 29, 25, 0.18);
 }
 
+.track-button-active {
+	color: #d4f5b0;
+	border-color: rgba(140, 220, 80, 0.35);
+	background: rgba(40, 90, 15, 0.32);
+}
+
 .stats {
 	margin: 1.5rem 0 0;
 	display: grid;
@@ -506,11 +511,17 @@ input[type="range"] {
 
 @media (max-width: 960px) {
 	.layout {
+		height: auto;
+		min-height: 100vh;
 		grid-template-columns: 1fr;
 	}
 
 	.viewer-shell {
 		min-height: 56vh;
+	}
+
+	.panel {
+		overflow-y: visible;
 	}
 
 	.viewer-hint {
