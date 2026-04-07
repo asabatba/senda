@@ -96,32 +96,26 @@ export function projectTrackSegments(
 	};
 }
 
-export function buildLinePositions(
-	segment: ProjectedTrackSegment,
-	exaggeration: number,
-) {
+export function buildLinePositions(segment: ProjectedTrackSegment) {
 	const positions: number[] = [];
 	for (const point of segment.points) {
 		positions.push(
 			point.x,
-			point.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET,
+			point.terrainHeight + TRACK_SURFACE_OFFSET,
 			point.z,
 		);
 	}
 	return positions;
 }
 
-export function computeTrackBounds(
-	overlay: TrackOverlay,
-	exaggeration: number,
-) {
+export function computeTrackBounds(overlay: TrackOverlay) {
 	const bounds = new THREE.Box3();
 	for (const segment of overlay.segments) {
 		for (const point of segment.points) {
 			bounds.expandByPoint(
 				new THREE.Vector3(
 					point.x,
-					point.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET,
+					point.terrainHeight + TRACK_SURFACE_OFFSET,
 					point.z,
 				),
 			);

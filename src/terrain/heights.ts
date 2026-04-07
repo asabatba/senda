@@ -120,14 +120,13 @@ export function sampleTerrainHeightAt(
 	return weightedHeight / totalWeight;
 }
 
-export function applyVerticalExaggeration(
+export function applyHeights(
 	geometry: THREE.PlaneGeometry,
 	heights: Float32Array,
-	factor: number,
 ) {
 	const position = geometry.attributes.position;
 	for (let index = 0; index < heights.length; index += 1) {
-		position.setY(index, heights[index] * factor);
+		position.setY(index, heights[index]);
 	}
 	position.needsUpdate = true;
 	geometry.computeVertexNormals();

@@ -14,12 +14,12 @@
 	"dependencies": {
 		"@preact/signals": "^2.9.0",
 		"fflate": "^0.8.2",
-		"preact": "^10.29.0",
+		"preact": "^10.29.1",
 		"three": "^0.183.2"
 	},
 	"devDependencies": {
 		"@preact/preset-vite": "^2.10.5",
-		"@types/node": "^25.5.0",
+		"@types/node": "^25.5.2",
 		"@types/three": "^0.183.1",
 		"typescript": "^6.0.2",
 		"vite": "^8.0.3"

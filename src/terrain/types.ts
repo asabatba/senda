@@ -57,7 +57,6 @@ export type TerrainMetadata = {
 		presets: Record<OrthophotoPresetId, OrthophotoPresetAsset>;
 	};
 	namedPlaces: NamedPlaceAsset | null;
-	defaultVerticalExaggeration: number;
 	overlay: {
 		url: string | null;
 	};
@@ -104,7 +103,6 @@ export type TerrainRuntime = {
 	heightCodes: Uint16Array;
 	metadata: TerrainMetadata;
 	assetsBaseUrl: string;
-	currentExaggeration: number;
 	currentOrthophotoPreset: OrthophotoPresetId;
 	namedPlaceOverlay: NamedPlaceOverlay | null;
 	namedPlacesVisible: boolean;

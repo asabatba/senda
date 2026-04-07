@@ -105,6 +105,13 @@ body {
 	transform: translateY(-1px);
 }
 
+.viewer-action-button--walk {
+	top: auto;
+	right: auto;
+	left: 1rem;
+	bottom: 4.5rem;
+}
+
 .viewer-overlay {
 	position: absolute;
 	inset: 0;

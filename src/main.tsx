@@ -12,7 +12,11 @@ import { inflateBinaryAsset, resolveAssetUrl } from "./terrain/assets";
 import { KEYBOARD_MOVE_CODES, TRACK_COLORS } from "./terrain/constants";
 import { formatBounds, formatCount, formatDistance } from "./terrain/format";
 import { parseGpxSegments } from "./terrain/gpx";
-import { applyVerticalExaggeration, buildHeightArray } from "./terrain/heights";
+import {
+	applyHeights,
+	buildHeightArray,
+	sampleTerrainHeightAt,
+} from "./terrain/heights";
 import {
 	createNamedPlaceOverlay,
 	disposeNamedPlaceOverlay,
@@ -79,6 +83,7 @@ const namedPlaceLegendVisible = signal(false);
 const namedPlaceLegend = signal<NamedPlaceLegendEntry[]>([]);
 const namedPlaceLegendCount = signal(0);
 const fullscreenActive = signal(false);
+const walkModeOn = signal(false);
 
 // ─── Preact components ────────────────────────────────────────────────────────
 
@@ -147,15 +152,34 @@ function App() {
 				>
 					{fullscreenActive.value ? "Exit fullscreen" : "Enter fullscreen"}
 				</button>
+				{controlsVisible.value && (
+					<button
+						class="viewer-action-button viewer-action-button--walk"
+						type="button"
+						onClick={handleWalkModeToggle}
+					>
+						{walkModeOn.value ? "Exit surface view" : "Surface view"}
+					</button>
+				)}
 				<canvas class="viewer" aria-label="3D terrain viewer" />
 				<div class="viewer-overlay" />
-				<div class="viewer-hint">
-					<strong>Keyboard</strong>
-					<span>
-						WASD or arrows to move, Q/E or PgUp/PgDn for altitude, Shift to
-						accelerate, F for fullscreen.
-					</span>
-				</div>
+				{walkModeOn.value ? (
+					<div class="viewer-hint">
+						<strong>Surface view</strong>
+						<span>
+							WASD or arrows to move · Mouse to look · Shift to accelerate ·
+							V or button to exit.
+						</span>
+					</div>
+				) : (
+					<div class="viewer-hint">
+						<strong>Keyboard</strong>
+						<span>
+							WASD or arrows to move, Q/E or PgUp/PgDn for altitude, Shift to
+							accelerate, F for fullscreen.
+						</span>
+					</div>
+				)}
 			</section>
 			<aside class="panel">
 				<p class="eyebrow">Pyrenees DEM + PNOA</p>
@@ -322,6 +346,17 @@ let animationHandle = 0;
 let trackColorCursor = 0;
 let orthophotoSwitchInFlight = false;
 
+// ─── Walk mode state ──────────────────────────────────────────────────────────
+
+const WALK_HEIGHT_OFFSET = 5; // real meters above terrain surface
+const WALK_PITCH_LIMIT = Math.PI * 0.42; // ~75° max vertical look
+const WALK_MOUSE_SENSITIVITY = 0.0018;
+const WALK_SPEED = 80; // meters per second (base)
+const WALK_NEAR_PLANE = 1; // tighter near clip to avoid terrain clipping
+
+const walkEuler = new THREE.Euler(0, 0, 0, "YXZ");
+let walkModeActive = false;
+
 // ─── UI callbacks (used in components) ────────────────────────────────────────
 
 async function handlePresetChange(event: Event) {
@@ -346,7 +381,7 @@ function handleNamedPlaceToggle(event: Event) {
 
 function handleResetCamera() {
 	if (!terrainRuntime) return;
-	resetCamera(terrainRuntime.metadata, terrainRuntime.currentExaggeration);
+	resetCamera(terrainRuntime.metadata);
 }
 
 function handleTrackToggle(overlay: TrackOverlay) {
@@ -561,17 +596,14 @@ function updateTrackMaterialsResolution() {
 	}
 }
 
-function updateTrackOverlayGeometry(
-	overlay: TrackOverlay,
-	exaggeration: number,
-) {
+function updateTrackOverlayGeometry(overlay: TrackOverlay) {
 	overlay.lines.forEach((line, index) => {
 		line.geometry.setPositions(
-			buildLinePositions(overlay.segments[index]!, exaggeration),
+			buildLinePositions(overlay.segments[index]!),
 		);
 		line.computeLineDistances();
 	});
-	overlay.bounds = computeTrackBounds(overlay, exaggeration);
+	overlay.bounds = computeTrackBounds(overlay);
 }
 
 function disposeTrackOverlay(overlay: TrackOverlay) {
@@ -648,7 +680,6 @@ function setNamedPlacesVisible(visible: boolean, persist = true) {
 	} else {
 		updateNamedPlaceOverlay(
 			terrainRuntime.namedPlaceOverlay,
-			terrainRuntime.currentExaggeration,
 			camera,
 			canvas,
 		);
@@ -659,13 +690,12 @@ function setNamedPlacesVisible(visible: boolean, persist = true) {
 	requestRender();
 }
 
-function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
+function resetCamera(metadata: TerrainMetadata) {
 	const maxSpan = Math.max(
 		metadata.sizeMeters.width,
 		metadata.sizeMeters.height,
 	);
-	const verticalRange =
-		(metadata.elevationRange.max - metadata.elevationRange.min) * exaggeration;
+	const verticalRange = metadata.elevationRange.max - metadata.elevationRange.min;
 	camera.position.set(0, maxSpan * 0.42 + verticalRange * 0.8, maxSpan * 0.82);
 	controls.target.set(0, verticalRange * 0.18, 0);
 	controls.maxDistance = maxSpan * 3.2;
@@ -673,6 +703,168 @@ function resetCamera(metadata: TerrainMetadata, exaggeration: number) {
 	camera.far = maxSpan * 8;
 	camera.updateProjectionMatrix();
 	controls.update();
+}
+
+function sampleWorldTerrainRawHeight(worldX: number, worldZ: number): number {
+	if (!terrainRuntime) return 0;
+	const { metadata } = terrainRuntime;
+	const normalizedX =
+		(worldX + metadata.sizeMeters.width / 2) / metadata.sizeMeters.width;
+	const normalizedZ =
+		(worldZ + metadata.sizeMeters.height / 2) / metadata.sizeMeters.height;
+	const rasterX = normalizedX * (metadata.width - 1);
+	const rasterY = normalizedZ * (metadata.height - 1);
+	return sampleTerrainHeightAt(terrainRuntime, rasterX, rasterY) ?? 0;
+}
+
+function enterWalkMode() {
+	if (!terrainRuntime || walkModeActive) return;
+	walkModeActive = true;
+	walkModeOn.value = true;
+
+	// Extract yaw/pitch from current camera direction.
+	// With YXZ euler: world dir = (-sin(yaw)*cos(pitch), sin(pitch), -cos(yaw)*cos(pitch))
+	const dir = new THREE.Vector3();
+	camera.getWorldDirection(dir);
+	walkEuler.x = Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
+	const cosPitch = Math.cos(walkEuler.x);
+	walkEuler.y =
+		cosPitch > 0.01 ? Math.atan2(-dir.x / cosPitch, -dir.z / cosPitch) : 0;
+	walkEuler.z = 0;
+
+	// Snap camera to terrain surface + offset
+	const rawHeight = sampleWorldTerrainRawHeight(
+		camera.position.x,
+		camera.position.z,
+	);
+	camera.position.y =
+		rawHeight + WALK_HEIGHT_OFFSET;
+
+	camera.rotation.order = "YXZ";
+	camera.rotation.set(walkEuler.x, walkEuler.y, 0);
+
+	// Tighter near plane so the terrain isn't clipped when looking down
+	camera.near = WALK_NEAR_PLANE;
+	camera.updateProjectionMatrix();
+
+	controls.enabled = false;
+	void canvas.requestPointerLock();
+	requestRender();
+}
+
+function exitWalkMode() {
+	if (!walkModeActive) return;
+	walkModeActive = false;
+	walkModeOn.value = false;
+
+	camera.near = 10;
+	camera.updateProjectionMatrix();
+
+	// Place the orbit target in front of the camera so controls feel natural
+	const dir = new THREE.Vector3();
+	camera.getWorldDirection(dir);
+	controls.target.copy(camera.position).addScaledVector(dir, 500);
+	controls.enabled = true;
+	controls.update();
+
+	document.exitPointerLock();
+	requestRender();
+}
+
+function handleWalkModeToggle() {
+	if (walkModeActive) {
+		exitWalkMode();
+	} else {
+		enterWalkMode();
+	}
+}
+
+function handleWalkMouseMove(event: MouseEvent) {
+	if (!walkModeActive || document.pointerLockElement !== canvas) return;
+
+	walkEuler.y -= event.movementX * WALK_MOUSE_SENSITIVITY;
+	walkEuler.x -= event.movementY * WALK_MOUSE_SENSITIVITY;
+	walkEuler.x = THREE.MathUtils.clamp(
+		walkEuler.x,
+		-WALK_PITCH_LIMIT,
+		WALK_PITCH_LIMIT,
+	);
+
+	camera.rotation.set(walkEuler.x, walkEuler.y, 0);
+	requestRender();
+}
+
+function updateWalkMode(deltaSeconds: number): boolean {
+	if (!terrainRuntime || !walkModeActive) return false;
+
+	let moved = false;
+
+	if (pressedKeys.size > 0) {
+		// Camera forward projected onto the XZ plane (no vertical movement)
+		const forwardX = -Math.sin(walkEuler.y);
+		const forwardZ = -Math.cos(walkEuler.y);
+		const rightX = Math.cos(walkEuler.y);
+		const rightZ = -Math.sin(walkEuler.y);
+
+		let dx = 0;
+		let dz = 0;
+		if (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp")) {
+			dx += forwardX;
+			dz += forwardZ;
+		}
+		if (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown")) {
+			dx -= forwardX;
+			dz -= forwardZ;
+		}
+		if (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight")) {
+			dx += rightX;
+			dz += rightZ;
+		}
+		if (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft")) {
+			dx -= rightX;
+			dz -= rightZ;
+		}
+
+		if (dx !== 0 || dz !== 0) {
+			const len = Math.sqrt(dx * dx + dz * dz);
+			const speedMult =
+				pressedKeys.has("ShiftLeft") || pressedKeys.has("ShiftRight") ? 2.5 : 1;
+			const step = (WALK_SPEED * speedMult * deltaSeconds) / len;
+
+			camera.position.x += dx * step;
+			camera.position.z += dz * step;
+
+			// Keep camera within terrain bounds
+			const halfW = terrainRuntime.metadata.sizeMeters.width / 2;
+			const halfH = terrainRuntime.metadata.sizeMeters.height / 2;
+			camera.position.x = THREE.MathUtils.clamp(
+				camera.position.x,
+				-halfW * 0.99,
+				halfW * 0.99,
+			);
+			camera.position.z = THREE.MathUtils.clamp(
+				camera.position.z,
+				-halfH * 0.99,
+				halfH * 0.99,
+			);
+
+			moved = true;
+		}
+	}
+
+	// Always track terrain height so the camera stays on the surface
+	const rawHeight = sampleWorldTerrainRawHeight(
+		camera.position.x,
+		camera.position.z,
+	);
+	const targetY =
+		rawHeight + WALK_HEIGHT_OFFSET;
+	if (Math.abs(camera.position.y - targetY) > 0.01) {
+		camera.position.y = targetY;
+		moved = true;
+	}
+
+	return moved;
 }
 
 function updateKeyboardNavigation(deltaSeconds: number) {
@@ -825,9 +1017,7 @@ function createTrackOverlay(name: string, segments: TrackSegment[]) {
 
 	for (const segment of overlay.segments) {
 		const geometry = new LineGeometry();
-		geometry.setPositions(
-			buildLinePositions(segment, terrainRuntime.currentExaggeration),
-		);
+		geometry.setPositions(buildLinePositions(segment));
 
 		const material = new LineMaterial({
 			color,
@@ -847,7 +1037,7 @@ function createTrackOverlay(name: string, segments: TrackSegment[]) {
 		lines.push(line);
 	}
 
-	updateTrackOverlayGeometry(overlay, terrainRuntime.currentExaggeration);
+	updateTrackOverlayGeometry(overlay);
 	scene.add(group);
 	trackOverlays.push(overlay);
 	return overlay;
@@ -973,11 +1163,7 @@ async function loadTerrain() {
 	);
 	geometry.rotateX(-Math.PI / 2);
 
-	applyVerticalExaggeration(
-		geometry,
-		heights,
-		metadata.defaultVerticalExaggeration,
-	);
+	applyHeights(geometry, heights);
 
 	const material = new THREE.MeshStandardMaterial({
 		map: surfaceTexture,
@@ -1006,7 +1192,6 @@ async function loadTerrain() {
 		heightCodes,
 		metadata,
 		assetsBaseUrl: metadataResponse.url,
-		currentExaggeration: metadata.defaultVerticalExaggeration,
 		currentOrthophotoPreset: currentPreset,
 		namedPlaceOverlay,
 		namedPlacesVisible: namedPlaceOverlay
@@ -1017,7 +1202,7 @@ async function loadTerrain() {
 	updateStats(metadata, currentPreset);
 	renderNamedPlaceLegend(metadata);
 	persistPresetSelection(currentPreset);
-	resetCamera(metadata, metadata.defaultVerticalExaggeration);
+	resetCamera(metadata);
 	resizeRenderer();
 	setNamedPlacesVisible(terrainRuntime.namedPlacesVisible, false);
 
@@ -1033,12 +1218,18 @@ async function loadTerrain() {
 function animate() {
 	animationHandle = 0;
 	const deltaSeconds = Math.min(clock.getDelta(), 0.1);
-	const movedByKeyboard = updateKeyboardNavigation(deltaSeconds);
-	const controlsChanged = controls.update();
+	let movedByKeyboard: boolean;
+	let controlsChanged: boolean;
+	if (walkModeActive) {
+		movedByKeyboard = updateWalkMode(deltaSeconds);
+		controlsChanged = false;
+	} else {
+		movedByKeyboard = updateKeyboardNavigation(deltaSeconds);
+		controlsChanged = controls.update();
+	}
 	if (terrainRuntime?.namedPlaceOverlay && terrainRuntime.namedPlacesVisible) {
 		updateNamedPlaceOverlay(
 			terrainRuntime.namedPlaceOverlay,
-			terrainRuntime.currentExaggeration,
 			camera,
 			canvas,
 		);
@@ -1108,6 +1299,17 @@ window.addEventListener("keydown", (event) => {
 		void handleFullscreenToggle();
 		return;
 	}
+	if (event.code === "KeyV" && !event.repeat) {
+		if (isEditableTarget(event.target)) return;
+		event.preventDefault();
+		handleWalkModeToggle();
+		return;
+	}
+	if (event.code === "Escape" && !event.repeat && walkModeActive) {
+		event.preventDefault();
+		exitWalkMode();
+		return;
+	}
 	if (!KEYBOARD_MOVE_CODES.has(event.code) || event.repeat) return;
 	if (isEditableTarget(event.target)) return;
 	const startingMovement = pressedKeys.size === 0;
@@ -1128,6 +1330,19 @@ window.addEventListener("blur", () => {
 	requestRender();
 });
 document.addEventListener("fullscreenchange", syncFullscreenState);
+document.addEventListener("pointerlockchange", () => {
+	// If pointer lock was released externally (e.g. Escape), exit walk mode
+	if (walkModeActive && document.pointerLockElement !== canvas) {
+		exitWalkMode();
+	}
+});
+canvas.addEventListener("click", () => {
+	// Re-acquire pointer lock if walk mode is active but lock was lost
+	if (walkModeActive && document.pointerLockElement !== canvas) {
+		void canvas.requestPointerLock();
+	}
+});
+window.addEventListener("mousemove", handleWalkMouseMove);
 
 loadTerrain().catch((error) => {
 	setStatus(

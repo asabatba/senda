@@ -15,7 +15,7 @@ import {
 	TRACK_SURFACE_OFFSET,
 } from "./terrain/constants";
 import {
-	applyVerticalExaggeration,
+	applyHeights,
 	buildHeightArray,
 	sampleHeightBilinear,
 } from "./terrain/heights";
@@ -99,7 +99,6 @@ type TerrainRuntime = {
 	heights: Float32Array;
 	heightCodes: Uint16Array;
 	mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
-	currentExaggeration: number;
 };
 
 type TrackTimelineLabel = {
@@ -489,8 +488,7 @@ function updateCameraFlight(now: number) {
 }
 
 function flyToPhotoFromGallery(photo: TripPhotoAnchor) {
-	const exaggeration = terrainRuntime?.currentExaggeration ?? 1;
-	const targetY = photo.terrainHeight * exaggeration + 22;
+	const targetY = photo.terrainHeight + 22;
 	flightTarget.set(photo.x, targetY, photo.z);
 	flightOffset.set(260, 190, 260);
 	const distance = THREE.MathUtils.clamp(
@@ -522,16 +520,10 @@ function handleGalleryWheel(event: WheelEvent) {
 function zoomToCluster(cluster: TripCluster) {
 	cameraFlight = null;
 	controls.enabled = true;
-	controls.target.set(
-		cluster.x,
-		cluster.terrainHeight * (terrainRuntime?.currentExaggeration ?? 1),
-		cluster.z,
-	);
+	controls.target.set(cluster.x, cluster.terrainHeight, cluster.z);
 	camera.position.set(
 		cluster.x + 260,
-		cluster.terrainHeight * (terrainRuntime?.currentExaggeration ?? 1) +
-			cluster.cardHeight +
-			180,
+		cluster.terrainHeight + cluster.cardHeight + 180,
 		cluster.z + 260,
 	);
 	controls.update();
@@ -582,22 +574,19 @@ function syncFullscreenState() {
 	requestRender();
 }
 
-function buildTrackPositions(points: TripTrackPoint[], exaggeration: number) {
+function buildTrackPositions(points: TripTrackPoint[]) {
 	const positions: number[] = [];
 	for (const point of points) {
 		positions.push(
 			point.x,
-			point.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET,
+			point.terrainHeight + TRACK_SURFACE_OFFSET,
 			point.z,
 		);
 	}
 	return positions;
 }
 
-function renderTrackSegments(
-	segments: TripTrackSegment[],
-	exaggeration: number,
-) {
+function renderTrackSegments(segments: TripTrackSegment[]) {
 	for (const line of trackLines) {
 		scene.remove(line);
 		line.geometry.dispose();
@@ -607,7 +596,7 @@ function renderTrackSegments(
 
 	for (const [index, segment] of segments.entries()) {
 		const geometry = new LineGeometry();
-		geometry.setPositions(buildTrackPositions(segment.points, exaggeration));
+		geometry.setPositions(buildTrackPositions(segment.points));
 
 		const material = new LineMaterial({
 			color: TRACK_COLORS[index % TRACK_COLORS.length],
@@ -662,11 +651,7 @@ function clearTrackTimelineLabels() {
 	trackTimelineLabels.length = 0;
 }
 
-function interpolateAtTime(
-	points: TripTrackPoint[],
-	targetMs: number,
-	exaggeration: number,
-) {
+function interpolateAtTime(points: TripTrackPoint[], targetMs: number) {
 	for (let i = 1; i < points.length; i += 1) {
 		const start = points[i - 1]!;
 		const end = points[i]!;
@@ -677,8 +662,7 @@ function interpolateAtTime(
 			return {
 				x: THREE.MathUtils.lerp(start.x, end.x, t),
 				y:
-					THREE.MathUtils.lerp(start.terrainHeight, end.terrainHeight, t) *
-						exaggeration +
+					THREE.MathUtils.lerp(start.terrainHeight, end.terrainHeight, t) +
 					TRACK_SURFACE_OFFSET +
 					28,
 				z: THREE.MathUtils.lerp(start.z, end.z, t),
@@ -708,7 +692,6 @@ type TimelineLabelCandidate = {
 
 function collectTimelineLabelAnchors(
 	points: TripTrackPoint[],
-	exaggeration: number,
 ): TimelineAnchor[] {
 	if (points.length === 0) return [];
 
@@ -718,7 +701,7 @@ function collectTimelineLabelAnchors(
 
 	anchors.push({
 		x: firstPoint.x,
-		y: firstPoint.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET + 28,
+		y: firstPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
 		z: firstPoint.z,
 		time: firstPoint.time,
 		kind: "start",
@@ -733,14 +716,14 @@ function collectTimelineLabelAnchors(
 		for (let t = firstHour; t < endMs; t += HOUR_MS) {
 			if (t - startMs < MIN_GAP_MS) continue;
 			if (endMs - t < MIN_GAP_MS) continue;
-			const pos = interpolateAtTime(points, t, exaggeration);
+			const pos = interpolateAtTime(points, t);
 			if (pos) anchors.push({ ...pos, time: t, kind: "hour" });
 		}
 	}
 
 	anchors.push({
 		x: lastPoint.x,
-		y: lastPoint.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET + 28,
+		y: lastPoint.terrainHeight + TRACK_SURFACE_OFFSET + 28,
 		z: lastPoint.z,
 		time: lastPoint.time,
 		kind: "end",
@@ -831,7 +814,7 @@ function isLabelOccludedByTerrain(worldPos: THREE.Vector3) {
 		return false;
 	}
 
-	const { metadata, heights, currentExaggeration } = terrainRuntime;
+	const { metadata, heights } = terrainRuntime;
 	const cameraPos = camera.position;
 	const horizontalDistance = Math.hypot(
 		worldPos.x - cameraPos.x,
@@ -852,14 +835,13 @@ function isLabelOccludedByTerrain(worldPos: THREE.Vector3) {
 		const sampleX = THREE.MathUtils.lerp(cameraPos.x, worldPos.x, t);
 		const sampleZ = THREE.MathUtils.lerp(cameraPos.z, worldPos.z, t);
 		const terrainSample = worldToHeightmapSample(metadata, sampleX, sampleZ);
-		const terrainHeight =
-			sampleHeightBilinear(
-				heights,
-				metadata.width,
-				metadata.height,
-				terrainSample.x,
-				terrainSample.y,
-			) * currentExaggeration;
+		const terrainHeight = sampleHeightBilinear(
+			heights,
+			metadata.width,
+			metadata.height,
+			terrainSample.x,
+			terrainSample.y,
+		);
 		const sightlineHeight = THREE.MathUtils.lerp(cameraPos.y, worldPos.y, t);
 		if (terrainHeight > sightlineHeight - 6) {
 			return true;
@@ -900,17 +882,13 @@ function appendTimelineLabel(
 function buildTrackTimelineLabels(
 	segments: TripTrackSegment[],
 	clusters: TripCluster[],
-	exaggeration: number,
 ) {
 	clearTrackTimelineLabels();
 
 	const candidates: TimelineLabelCandidate[] = [];
 
 	for (const segment of segments) {
-		for (const anchor of collectTimelineLabelAnchors(
-			segment.points,
-			exaggeration,
-		)) {
+		for (const anchor of collectTimelineLabelAnchors(segment.points)) {
 			const text = formatTimelineLabel(anchor.time, anchor.kind);
 			if (!text) continue;
 			candidates.push({
@@ -933,7 +911,7 @@ function buildTrackTimelineLabels(
 
 		candidates.push({
 			x: cluster.x,
-			y: cluster.terrainHeight * exaggeration + TRACK_SURFACE_OFFSET + 28,
+			y: cluster.terrainHeight + TRACK_SURFACE_OFFSET + 28,
 			z: cluster.z,
 			timeMs: sortTimeMs,
 			text,
@@ -1078,7 +1056,6 @@ async function loadTextureFromImage(
 async function buildClusterObject(
 	cluster: TripCluster,
 	anchors: TripPhotoAnchor[],
-	exaggeration: number,
 ) {
 	const group = new THREE.Group();
 	group.position.set(cluster.x, 0, cluster.z);
@@ -1087,7 +1064,7 @@ async function buildClusterObject(
 	const CARD_W = 250;
 	const CARD_H = 164;
 	const CARD_GAP = 10;
-	const anchorY = cluster.terrainHeight * exaggeration + 6;
+	const anchorY = cluster.terrainHeight + 6;
 	const cardY = anchorY + cluster.cardHeight;
 	const anchorById = new Map(anchors.map((anchor) => [anchor.id, anchor]));
 	const members = cluster.memberIds
@@ -1168,7 +1145,6 @@ function disposeClusterObject(object: THREE.Object3D) {
 async function renderClusters(
 	clusters: TripCluster[],
 	anchors: TripPhotoAnchor[],
-	exaggeration: number,
 ) {
 	for (const object of clusterObjects) {
 		disposeClusterObject(object);
@@ -1177,11 +1153,7 @@ async function renderClusters(
 	photoSprites.length = 0;
 
 	for (const cluster of clusters) {
-		const clusterObject = await buildClusterObject(
-			cluster,
-			anchors,
-			exaggeration,
-		);
+		const clusterObject = await buildClusterObject(cluster, anchors);
 		clusterObjects.push(clusterObject);
 		scene.add(clusterObject);
 	}
@@ -1195,8 +1167,7 @@ function focusScene(metadata: TerrainMetadata) {
 		metadata.sizeMeters.height,
 	);
 	const verticalRange =
-		(metadata.elevationRange.max - metadata.elevationRange.min) *
-		(terrainRuntime?.currentExaggeration ?? 1);
+		metadata.elevationRange.max - metadata.elevationRange.min;
 
 	camera.position.set(0, maxSpan * 0.48 + verticalRange, maxSpan * 0.82);
 	controls.target.set(0, verticalRange * 0.15, 0);
@@ -1429,11 +1400,7 @@ async function loadTerrainAndTrip() {
 		metadata.height - 1,
 	);
 	geometry.rotateX(-Math.PI / 2);
-	applyVerticalExaggeration(
-		geometry,
-		heights,
-		metadata.defaultVerticalExaggeration,
-	);
+	applyHeights(geometry, heights);
 
 	const material = new THREE.MeshStandardMaterial({
 		map: texture,
@@ -1452,20 +1419,11 @@ async function loadTerrainAndTrip() {
 		heights,
 		heightCodes,
 		mesh,
-		currentExaggeration: metadata.defaultVerticalExaggeration,
 	};
 
-	renderTrackSegments(trip.trackSegments, terrainRuntime.currentExaggeration);
-	await renderClusters(
-		trip.clusters,
-		trip.photoAnchors,
-		terrainRuntime.currentExaggeration,
-	);
-	buildTrackTimelineLabels(
-		trip.trackSegments,
-		trip.clusters,
-		terrainRuntime.currentExaggeration,
-	);
+	renderTrackSegments(trip.trackSegments);
+	await renderClusters(trip.clusters, trip.photoAnchors);
+	buildTrackTimelineLabels(trip.trackSegments, trip.clusters);
 
 	tripClusters.value = trip.clusters;
 	tripPhotoAnchors.value = trip.photoAnchors;
